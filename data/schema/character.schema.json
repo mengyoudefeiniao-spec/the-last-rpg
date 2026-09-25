@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://the-last-rpg/schema/character.schema.json",
+  "title": "角色（Character）",
+  "type": "object",
+  "required": ["id", "name", "kind"],
+  "properties": {
+    "id": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "name": { "type": "string" },
+    "kind": {
+      "enum": ["hero", "companion", "npc", "antagonist"],
+      "description": "hero=主角（跨世）· companion=同伴 · npc · antagonist=反派"
+    },
+    "summary": { "type": "string" },
+    "doc": { "type": "string", "description": "对应的人物档（项目根相对路径）" },
+    "generations": {
+      "type": "array",
+      "description": "各世身份。跨世角色（主角 / 苏昭 / 云鹤）用；单世 NPC 可省略。",
+      "items": {
+        "type": "object",
+        "required": ["gen", "name"],
+        "properties": {
+          "gen": { "type": "integer", "minimum": 0, "maximum": 7, "description": "0=序章/现实世界；1..7=第 N 世" },
+          "id": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+          "name": { "type": "string" },
+          "gender": { "enum": ["male", "female", "unknown"] },
+          "origin": { "type": "string", "description": "出身 / 灵根" },
+          "commands": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "该世可用指令（对应 CommandId）"
+          },
+          "systems": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "该世可用的战斗外系统（如 soul-refining / formation）"
+          },
+          "realmCap": { "type": "string", "description": "该世境界上限" },
+          "debutStory": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["target", "kind"],
+        "properties": {
+          "target": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+          "kind": { "enum": ["bond", "master", "rival", "kin", "colleague"] },
+          "note": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "assets": {
+      "type": "object",
+      "properties": {
+        "portrait": { "type": "string" },
+        "sprite": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

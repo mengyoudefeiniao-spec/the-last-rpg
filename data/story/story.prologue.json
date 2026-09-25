@@ -1,0 +1,22 @@
+{
+  "id": "story.prologue",
+  "title": "序章 · 未完成的游戏",
+  "generation": 0,
+  "targetMinutes": 60,
+  "chapterDoc": "docs/30-剧情/主线/序章-未完成的游戏.md",
+  "next": "story.vol1",
+  "quests": [
+    "quest.prologue.day",
+    "quest.prologue.play",
+    "quest.prologue.death",
+    "quest.prologue.fall"
+  ],
+  "playableCommands": ["attack", "defend", "flee"],
+  "playableSystems": [],
+  "flags": [
+    { "id": "flag.anchor.story", "type": "bool", "default": false, "desc": "是否看过《The Last RPG》的结局草稿", "crossGeneration": true },
+    { "id": "flag.prologue.pushedTogether", "type": "bool", "default": false, "desc": "游戏片段里是否选了「一起推门」", "crossGeneration": true },
+    { "id": "flag.prologue.erasedPartner", "type": "bool", "default": false, "desc": "是否翻过相册（被裁掉的那个人）", "crossGeneration": true },
+    { "id": "story.prologue.done", "type": "bool", "default": false, "desc": "序章完成（进入第一世的前置）" }
+  ]
+}

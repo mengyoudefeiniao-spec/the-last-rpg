@@ -1,0 +1,50 @@
+{
+  "id": "quest.side.caravan",
+  "story": "story.vol1",
+  "title": "支线 · 迷路的商队",
+  "kind": "side",
+  "targetMinutes": 15,
+  "prereq": ["quest.vol1.village"],
+  "objectives": [
+    { "id": "o_meet", "text": "在官道岔口遇到迷路的商队" },
+    { "id": "o_escort", "text": "带路去青芜村" },
+    { "id": "o_child", "text": "若商队里有孩子：决定是否护住他" }
+  ],
+  "choices": [
+    {
+      "id": "c_help",
+      "text": "立刻答应，不谈报酬。",
+      "effects": [{ "addValue": { "flag": "flag.bond.caravan-child", "delta": 1 } }],
+      "note": "孩子在路途中亲近主角"
+    },
+    {
+      "id": "c_charge",
+      "text": "谈报酬（要灵石或干粮）。",
+      "effects": [],
+      "note": "得 20 灵石；首领悻悻"
+    },
+    {
+      "id": "c_refuse",
+      "text": "拒绝，只指个方向。",
+      "effects": [{ "setFlag": "flag.folk.lostChild" }],
+      "note": "支线终止；夜里 20% 概率在路边发现商队残骸"
+    },
+    {
+      "id": "c_protect_child",
+      "text": "（归途遇袭时）护住孩子。",
+      "requires": { "flag": "flag.folk.inAmbush", "eq": true },
+      "effects": [
+        { "setFlag": "flag.folk.savedChild" },
+        { "addValue": { "flag": "flag.bond.caravan-child", "delta": 2 } }
+      ],
+      "note": "承受额外伤害，但孩子存活"
+    }
+  ],
+  "encounters": [],
+  "rewards": {
+    "currency": { "spiritstone": 20 },
+    "items": ["item.vol1.pinganfu"]
+  },
+  "onComplete": [{ "setFlag": "quest.side.caravan.done" }],
+  "note": "跨世回响：孩子若存活，第七世以转生者身份出现（需 flag.bond.caravan-child >= 4 才会并肩）"
+}

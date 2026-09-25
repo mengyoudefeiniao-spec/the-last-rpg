@@ -1,0 +1,42 @@
+{
+  "id": "quest.vol1.village",
+  "story": "story.vol1",
+  "title": "第一幕 · 村子与山",
+  "kind": "main",
+  "targetMinutes": 25,
+  "prereq": ["quest.vol1.prologue"],
+  "objectives": [
+    { "id": "o_explore", "text": "探索青芜村：后山的禁忌、「山里会说话的石头」的传说" },
+    { "id": "o_boars", "text": "击退受惊的野猪群（此时只有「普通攻击」）" },
+    {
+      "id": "o_cave",
+      "text": "找到青芜山隐藏洞窟，拾得游魂「缓存」",
+      "optional": false,
+      "done": { "flag": "flag.vol1.gotCache", "eq": true }
+    }
+  ],
+  "choices": [
+    {
+      "id": "c_trust",
+      "text": "相信预感：提前拦住苏昭。",
+      "effects": [
+        { "setFlag": "flag.choice.vol1.trustedForeboding" },
+        { "addBond": { "target": "char.suzhao", "delta": 1 } }
+      ],
+      "note": "野猪群的数量与攻击目标会重新随机——救了苏昭，却可能伤到别人"
+    },
+    {
+      "id": "c_ignore",
+      "text": "当它是幻觉。",
+      "effects": [],
+      "note": "苏昭受伤，主角事后懊悔"
+    }
+  ],
+  "encounters": ["encounter.vol1.boars"],
+  "onComplete": [
+    { "collectSoul": "soul.drifting.cache" },
+    { "setFlag": "flag.vol1.gotCache" },
+    { "unlockSkill": "skill.soul.cache" }
+  ],
+  "next": "quest.vol1.yunhe"
+}

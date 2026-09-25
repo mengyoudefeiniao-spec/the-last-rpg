@@ -1,0 +1,26 @@
+{
+  "id": "encounter.vol1.beast-tide",
+  "story": "story.vol1",
+  "terrain": "plain",
+  "units": [
+    {
+      "id": "beast-1",
+      "name": "被引下山的妖兽",
+      "side": "enemy",
+      "stats": { "maxHp": 70, "maxMp": 10, "maxSp": 30, "atk": 13, "def": 7, "mag": 4, "res": 5, "spd": 8 }
+    },
+    {
+      "id": "beast-2",
+      "name": "被引下山的妖兽",
+      "side": "enemy",
+      "stats": { "maxHp": 70, "maxMp": 10, "maxSp": 30, "atk": 13, "def": 7, "mag": 4, "res": 5, "spd": 8 }
+    },
+    {
+      "id": "beast-3",
+      "name": "被引下山的妖兽",
+      "side": "enemy",
+      "stats": { "maxHp": 70, "maxMp": 10, "maxSp": 30, "atk": 13, "def": 7, "mag": 4, "res": 5, "spd": 8 }
+    }
+  ],
+  "note": "第三幕的战斗高潮。此时主角已会「法术」+ 游魂技能「缓存体」——教学「缓存体」的最好场合。"
+}

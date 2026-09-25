@@ -266,7 +266,9 @@ test('服务端推行动条，条满才轮到人 —— 此时才能下达指令
       await client.nextSnapshot();
 
       client.send({ type: 'beginBattle' });
-      await client.nextSnapshot();
+      const opened = await client.nextSnapshot();
+      const enemy = opened.snapshot.units.find((u) => u.side === 'enemy' && u.alive);
+      assert.ok(enemy, '应当有活着的敌人');
 
       // 等行动条走到有人能动。这一步本身就验证了「服务端在推进」
       const awaiting = await client.waitForReadyUnit();
@@ -275,14 +277,24 @@ test('服务端推行动条，条满才轮到人 —— 此时才能下达指令
       const unitId = awaiting[0];
       assert.ok(unitId);
 
-      const before = await client.nextSnapshot();
-      const unit = before.snapshot.units.find((u) => u.id === unitId);
-      assert.ok(unit, '等着指令的单位应当在场上');
-      assert.ok(unit.gauge >= 100, '能动就意味着条满了');
-      assert.equal(unit.awaitingCommand, true, '条满的单位应当挂上等待标记');
+      // 有人等着下指令时，服务端会停下 —— 状态不再变化，也就没有新快照。
+      // 所以它现在什么状态，只能从行动条心跳里读。
+      const tick = await client.nextOfType('tick');
+      const gauge = tick.tick.gauges.find((entry) => entry.unitId === unitId);
+      assert.ok(gauge, '心跳里应当带着这个单位的行动值');
+      assert.ok(gauge.gauge >= 100, '能动就意味着条满了');
 
-      const enemy = before.snapshot.units.find((u) => u.side === 'enemy' && u.alive);
-      assert.ok(enemy, '应当有活着的敌人');
+      // 而且从这一刻起，全场的行动值都冻住了 —— 谁也不许趁你思考时偷跑
+      const frozenAt = new Map(tick.tick.gauges.map((entry) => [entry.unitId, entry.gauge]));
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const later = await client.nextOfType('tick');
+      for (const entry of later.tick.gauges) {
+        assert.equal(
+          entry.gauge,
+          frozenAt.get(entry.unitId),
+          `${entry.unitId} 的行动值不该在等你下指令时变化`,
+        );
+      }
 
       client.send({
         type: 'act',
@@ -363,7 +375,7 @@ test('重开一局会换一个新的 sessionId', async () => {
   });
 });
 
-test('演出播放期间行动条照常推进 —— 服务端不等客户端确认', async () => {
+test('服务端不等客户端确认演出 —— 心跳照推不误', async () => {
   await withServer(async (url) => {
     const client = await TestClient.connect(url);
     try {

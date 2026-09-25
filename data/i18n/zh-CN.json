@@ -1,0 +1,22 @@
+{
+  "id": "i18n.zh-CN",
+  "locale": "zh-CN",
+  "note": "文本表样例：key 格式为 `<实体 id>.<节点 id>.<字段>`。正式导出时，所有面向玩家的文案应逐步迁到这里。",
+  "entries": {
+    "dlg.vol1.prologue.n_wake.text": "他睁开眼，在一个六岁孩子的身体里。屋外有鸡叫，是这个世界的声音。",
+    "dlg.vol1.prologue.n_word.text": "……我没事，就是……缓存满了。",
+    "dlg.vol1.prologue.n_grandma.text": "……「缓存」？那是啥？",
+    "dlg.vol1.yunhe-stele.n_answer.text": "有个老词，叫「畸轮」……老朽管那些碎片叫……「残魂」。捡得回来，人就还是那个人。",
+    "dlg.vol1.yunhe-stele.n_yunhe_key.text": "回去吧。天黑前一定要到家。",
+    "dlg.vol1.finale.n_soul.text": "在界间，残魂第一次变得完整。他想起来的第一句话，是最后一次合上电脑时说的：「……保存一下。」",
+    "dlg.vol1.finale.n_teaser.text": "（下一世，你会失去这一世的法术。）",
+    "quest.vol1.prologue.title": "序幕 · 醒在别人的身体里",
+    "quest.vol1.village.title": "第一幕 · 村子与山",
+    "quest.vol1.yunhe.title": "第二幕 · 云鹤与碑",
+    "quest.vol1.shadow.title": "第三幕 · 山下的阴影",
+    "quest.vol1.finale.title": "终幕 · 天黑前回家",
+    "quest.side.caravan.title": "支线 · 迷路的商队",
+    "story.prologue.title": "序章 · 未完成的游戏",
+    "story.vol1.title": "第一世 · 青芜山下"
+  }
+}

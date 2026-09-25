@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://the-last-rpg/schema/common.schema.json",
+  "title": "共用定义（Common）",
+  "description": "供其它 schema 通过 $ref 复用的基础类型。见 data/README.md。",
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(\\.[a-z0-9][a-z0-9-]*)+$",
+      "description": "规格化 ID：`类型.名字`（分段用 .，段内用短横线），全小写。一经使用不再改。例：char.hero / quest.vol1.prologue"
+    },
+    "LocalizedText": {
+      "description": "文本：可直接给中文，或用 i18n key 引用（推荐最终走 i18n）",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "required": ["key"],
+          "properties": { "key": { "type": "string" } },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Condition": {
+      "type": "object",
+      "description": "条件表达式：flag 比较 / 道具 / 残魂；all·any·not 可嵌套。空对象 = 恒真。",
+      "properties": {
+        "all": { "type": "array", "items": { "$ref": "#/$defs/Condition" } },
+        "any": { "type": "array", "items": { "$ref": "#/$defs/Condition" } },
+        "not": { "$ref": "#/$defs/Condition" },
+        "flag": { "type": "string" },
+        "eq": {},
+        "gte": { "type": "number" },
+        "lte": { "type": "number" },
+        "hasItem": { "type": "string" },
+        "hasSoul": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "Effect": {
+      "type": "object",
+      "description": "状态变更：置 flag / 设值 / 加值 / 给道具 / 加羁绊 / 收残魂 / 解锁技能",
+      "properties": {
+        "setFlag": { "type": "string", "description": "把该 flag 置为 true" },
+        "setValue": {
+          "type": "object",
+          "required": ["flag", "value"],
+          "properties": { "flag": { "type": "string" }, "value": {} },
+          "additionalProperties": false
+        },
+        "addValue": {
+          "type": "object",
+          "required": ["flag", "delta"],
+          "properties": { "flag": { "type": "string" }, "delta": { "type": "number" } },
+          "additionalProperties": false
+        },
+        "giveItem": { "type": "string" },
+        "addBond": {
+          "type": "object",
+          "required": ["target", "delta"],
+          "properties": { "target": { "type": "string" }, "delta": { "type": "number" } },
+          "additionalProperties": false
+        },
+        "collectSoul": { "type": "string", "description": "残魂 ID（世魂 / 游魂）" },
+        "unlockSkill": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "Reward": {
+      "type": "object",
+      "properties": {
+        "items": { "type": "array", "items": { "type": "string" } },
+        "currency": {
+          "type": "object",
+          "properties": {
+            "spiritstone": { "type": "number" },
+            "gold": { "type": "number" }
+          },
+          "additionalProperties": false
+        },
+        "exp": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "Choice": {
+      "type": "object",
+      "required": ["id", "text"],
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "$ref": "#/$defs/LocalizedText" },
+        "requires": { "$ref": "#/$defs/Condition" },
+        "effects": { "type": "array", "items": { "$ref": "#/$defs/Effect" } },
+        "note": { "type": "string", "description": "给设计者的说明（不进游戏）" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

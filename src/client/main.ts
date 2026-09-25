@@ -23,7 +23,19 @@ let stage: BattleStage | null = null;
 let view: BattleView;
 
 const client = new BattleClient({
-  onMessage: (message) => enqueue(message),
+  /**
+   * 行动条心跳**不进队列**：它只挪动条上的图标，不会和演出播放打架。
+   * 一旦排进队列，它就会跟着演出一起滞后 —— 看起来就像「卡在行动点上等人下指令」。
+   */
+  onMessage: (message) => {
+    if (message.type === 'tick') {
+      mirror.applyTick(message.tick.gauges, message.tick.awaitingUnitIds);
+      view.refreshGauges();
+      return;
+    }
+
+    enqueue(message);
+  },
   onStatusChange: (status, detail) => view.setConnectionStatus(status, detail),
 });
 
@@ -65,12 +77,8 @@ async function handleMessage(message: ServerMessage): Promise<void> {
     return;
   }
 
-  // 行动条心跳：只更新条的位置与「谁能操作」，不碰别的
-  if (message.type === 'tick') {
-    mirror.applyTick(message.tick.gauges, message.tick.awaitingUnitIds);
-    view.refreshGauges();
-    return;
-  }
+  // 行动条心跳在入队前就已经处理掉了，走到这里只可能是完整状态
+  if (message.type !== 'snapshot') return;
 
   const { snapshot, records } = message;
 

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://the-last-rpg/schema/story.schema.json",
+  "title": "章节（Story）",
+  "description": "一章 = 一世（或序章）。见 docs/30-剧情/主线/。",
+  "type": "object",
+  "required": ["id", "title", "generation", "quests"],
+  "properties": {
+    "id": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "title": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/LocalizedText" },
+    "generation": { "type": "integer", "minimum": 0, "maximum": 7, "description": "0=序章；1..7=第 N 世" },
+    "targetMinutes": { "type": "number", "description": "本章目标游玩时长（分钟）" },
+    "chapterDoc": { "type": "string", "description": "详案文档（项目根相对路径）" },
+    "prev": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "next": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "quests": {
+      "type": "array",
+      "items": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" }
+    },
+    "playableCommands": {
+      "type": "array",
+      "description": "本章可用的战斗指令（对应 CommandId），见规则体系 7.2",
+      "items": { "type": "string" }
+    },
+    "playableSystems": {
+      "type": "array",
+      "description": "本章可用的战斗外系统（soul-refining / formation）",
+      "items": { "type": "string" }
+    },
+    "soul": {
+      "type": "object",
+      "description": "本章可获得的残魂",
+      "properties": {
+        "worldSoul": { "type": "string", "description": "归位的世魂（本世临终）" },
+        "driftingSouls": {
+          "type": "array",
+          "description": "本章隐藏区域可拾得的游魂",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "flags": {
+      "type": "array",
+      "description": "本章引入的 flag（跨世的也要在此登记）",
+      "items": {
+        "type": "object",
+        "required": ["id", "type"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "enum": ["bool", "int"] },
+          "default": {},
+          "desc": { "type": "string" },
+          "crossGeneration": { "type": "boolean", "default": false }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

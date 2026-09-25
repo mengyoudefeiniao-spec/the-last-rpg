@@ -1,0 +1,8 @@
+{
+  "id": "item.vol1.pinganfu",
+  "name": "平安符",
+  "kind": "key",
+  "desc": "商队的孩子塞给主角的一枚平安符——很旧、很不值钱，但孩子说「这个给你」。",
+  "doc": "docs/30-剧情/支线/支线示例-迷路的商队.md",
+  "crossGeneration": true
+}

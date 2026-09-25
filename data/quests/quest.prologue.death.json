@@ -1,0 +1,16 @@
+{
+  "id": "quest.prologue.death",
+  "story": "story.prologue",
+  "title": "幕 3 · 没做完",
+  "kind": "main",
+  "targetMinutes": 10,
+  "prereq": ["quest.prologue.play"],
+  "objectives": [
+    { "id": "o_death", "text": "沈述倒下——没有戏剧性的告别" },
+    { "id": "o_continue", "text": "（唯一的操作）按住「继续」——按多久都没有反应" }
+  ],
+  "choices": [],
+  "onComplete": [{ "setFlag": "quest.prologue.death.done" }],
+  "next": "quest.prologue.fall",
+  "note": "黑屏前出现一行字：「……能不能，让我把它讲完。」"
+}

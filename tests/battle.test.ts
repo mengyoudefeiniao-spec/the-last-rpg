@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { BALANCE } from '../src/shared/config/balance.ts';
 import { createRng } from '../src/shared/core/rng.ts';
 import { getBattlefield } from '../src/shared/data/battlefields.ts';
 import { getFormation, listFormations } from '../src/shared/data/formations.ts';
@@ -131,48 +132,77 @@ test('攒满之后进入待指令，行动完条归零', async () => {
   assert.equal(actor.actionGauge, 0, '行动完行动值归零');
 });
 
-test('你还在犹豫时行动条不会停 —— 敌人照样能抢先动手', async () => {
+test('你在犹豫时，整个战场的时间是停的', async () => {
   const battle = makeBattle(5);
   battle.start();
   await battle.beginBattle();
 
   await advanceUntilReady(battle);
-  assert.ok(battle.awaitingUnits.length > 0, '应当有人正等着指令');
+  const waiting = battle.awaitingUnits[0];
+  assert.ok(waiting, '应当有人正等着指令');
 
-  // 关键：挂起不操作，继续推进时间
+  const gaugesBefore = new Map(battle.units.map((unit) => [unit.id, unit.actionGauge]));
   const logBefore = battle.log.length;
+
+  // 挂着指令不下，往里喂 8 秒时间
   await battle.advance(8000);
 
-  assert.ok(
-    battle.log.length > logBefore,
-    '玩家不下指令时，敌方的条照样该走满并动手 —— 这就是实时行动条',
-  );
-  assert.ok(
-    battle.awaitingUnits.length > 0,
-    '等着指令的单位应当一直挂着，不会被时间吞掉',
-  );
+  // 敌方一步都不许动，全场的条一格都不许涨 —— 这是刻意的，
+  // 否则就成了「你还在斟酌，敌人偷跑一轮」。
+  assert.equal(battle.log.length, logBefore, '等你下指令时，敌方不该擅自出手');
+  for (const unit of battle.units) {
+    assert.equal(
+      unit.actionGauge,
+      gaugesBefore.get(unit.id),
+      `${unit.name} 的行动值不该在等待期间变化`,
+    );
+  }
+
+  assert.ok(battle.awaitingUnits.length > 0, '等着指令的单位应当一直挂着');
 });
 
-test('同时到点的多个单位都能各自行动', async () => {
+test('干等着下指令时，它的行动值一直停在满值', async () => {
+  const battle = makeBattle(6);
+  battle.start();
+  await battle.beginBattle();
+
+  await advanceUntilReady(battle);
+  const waiting = battle.awaitingUnits[0];
+  assert.ok(waiting, '应当有人等着指令');
+  assert.equal(waiting.actionGauge, BALANCE.gaugeMax, '到点就该攒满');
+
+  // 干等 4 秒（这段时间敌方照样行动），它的行动值必须一动不动 —— 还没出手呢。
+  // 一旦这里松动了，行动条上就会出现「明明满了、却不在行动点上」的鬼影。
+  for (let step = 0; step < 40; step += 1) {
+    if (battle.finished) break;
+    await battle.advance(100);
+    assert.equal(
+      waiting.actionGauge,
+      BALANCE.gaugeMax,
+      `等待期间行动值不该变，第 ${step} 步却变成了 ${waiting.actionGauge}`,
+    );
+  }
+});
+
+test('同时到点的多个单位，一次只交给你一个', async () => {
   const battle = makeBattle(4);
   battle.start();
   await battle.beginBattle();
 
   await advanceUntilReady(battle);
 
-  const ready = battle.awaitingUnits;
-  assert.ok(ready.length >= 1, '推这么久了，至少该有人能动');
+  // 时间既然是停的，就不该一口气冒出好几个待指令的人
+  assert.equal(battle.awaitingUnits.length, 1, '一次只该有一个单位等你下指令');
 
-  // 逐个下指令，直到没人等着为止
-  const handled: string[] = [];
-  while (battle.awaitingUnits.length > 0 && handled.length < 10) {
-    const actor = battle.awaitingUnits[0];
-    assert.ok(actor);
-    handled.push(actor.id);
-    await battle.submitAction(actor.id, { actorId: actor.id, commandId: 'defend' });
-  }
+  const first = battle.awaitingUnits[0];
+  assert.ok(first, '应当有人等着指令');
+  await battle.submitAction(first.id, { actorId: first.id, commandId: 'defend' });
 
-  assert.equal(new Set(handled).size, handled.length, '同一个单位不该被处理两次');
+  // 处理掉它，才轮到下一个攒满的人
+  await battle.advance(3000);
+  const next = battle.awaitingUnits[0];
+  assert.ok(next, '还有别人攒满了，应当接着轮到他');
+  assert.notEqual(next.id, first.id, '不该还是刚出手的那个人');
 });
 
 // ---------------------------------------------------------------------------

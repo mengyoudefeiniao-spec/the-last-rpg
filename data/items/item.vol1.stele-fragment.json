@@ -1,0 +1,8 @@
+{
+  "id": "item.vol1.stele-fragment",
+  "name": "轮回碑残段",
+  "kind": "key",
+  "desc": "青芜山中的一块无名古碑残段——后证实为「轮回碑」的一部分。上面有一句浅浅的话。",
+  "doc": "docs/30-剧情/主线/第一卷-青芜山下.md",
+  "crossGeneration": true
+}

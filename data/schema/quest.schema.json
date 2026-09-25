@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://the-last-rpg/schema/quest.schema.json",
+  "title": "任务（Quest）",
+  "type": "object",
+  "required": ["id", "story", "title", "objectives"],
+  "properties": {
+    "id": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "story": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "title": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/LocalizedText" },
+    "kind": { "enum": ["main", "side", "tutorial"] },
+    "targetMinutes": { "type": "number" },
+    "trigger": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Condition" },
+    "prereq": {
+      "type": "array",
+      "items": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" }
+    },
+    "objectives": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "text"],
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/LocalizedText" },
+          "optional": { "type": "boolean", "default": false },
+          "done": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Condition" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "choices": {
+      "type": "array",
+      "items": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Choice" }
+    },
+    "dialogues": {
+      "type": "array",
+      "items": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" }
+    },
+    "encounters": {
+      "type": "array",
+      "items": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" }
+    },
+    "onComplete": {
+      "type": "array",
+      "items": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Effect" }
+    },
+    "rewards": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Reward" },
+    "next": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" }
+  },
+  "additionalProperties": false
+}

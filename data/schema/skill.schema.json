@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://the-last-rpg/schema/skill.schema.json",
+  "title": "技能（Skill）",
+  "type": "object",
+  "required": ["id", "name", "source"],
+  "properties": {
+    "id": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "name": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/LocalizedText" },
+    "source": {
+      "enum": ["spell", "martial", "soul"],
+      "description": "spell=法术 · martial=武技/特技 · soul=游魂专属技能"
+    },
+    "desc": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/LocalizedText" },
+    "commandId": {
+      "type": "string",
+      "description": "对应 CommandId（若适用）"
+    },
+    "cost": {
+      "type": "object",
+      "properties": { "mp": { "type": "number" }, "sp": { "type": "number" } },
+      "additionalProperties": false
+    },
+    "params": {
+      "type": "object",
+      "description": "机制参数（对齐 docs/40-玩法设计/战斗与成长.md）"
+    }
+  },
+  "additionalProperties": false
+}

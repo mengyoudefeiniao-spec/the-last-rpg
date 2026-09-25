@@ -1,0 +1,42 @@
+{
+  "id": "quest.prologue.day",
+  "story": "story.prologue",
+  "title": "幕 1 · 一天",
+  "kind": "tutorial",
+  "targetMinutes": 20,
+  "objectives": [
+    { "id": "o_room", "text": "查看出租屋：泡面桶、贴满便签的显示器、擦得很干净的手绘板" },
+    {
+      "id": "o_memo",
+      "text": "（可选）看一眼便签上《The Last RPG》的结局草稿",
+      "optional": true,
+      "done": { "flag": "flag.anchor.story", "eq": true }
+    },
+    {
+      "id": "o_album",
+      "text": "（可选）翻手机相册——合影里有一个人被裁掉了",
+      "optional": true,
+      "done": { "flag": "flag.prologue.erasedPartner", "eq": true }
+    },
+    {
+      "id": "o_project",
+      "text": "（可选）点开游戏工程，看到「章节 7 · 未完成」",
+      "optional": true
+    }
+  ],
+  "choices": [
+    {
+      "id": "c_memo",
+      "text": "看一眼便签。",
+      "effects": [{ "setFlag": "flag.anchor.story" }],
+      "note": "第七世元叙事结局文本的完整度"
+    },
+    {
+      "id": "c_album",
+      "text": "翻手机相册。",
+      "effects": [{ "setFlag": "flag.prologue.erasedPartner" }],
+      "note": "第七世揭示「被裁掉的那个人」"
+    }
+  ],
+  "next": "quest.prologue.play"
+}

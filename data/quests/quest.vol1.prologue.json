@@ -1,0 +1,34 @@
+{
+  "id": "quest.vol1.prologue",
+  "story": "story.vol1",
+  "title": "序幕 · 醒在别人的身体里",
+  "kind": "tutorial",
+  "targetMinutes": 10,
+  "prereq": ["story.prologue"],
+  "trigger": { "flag": "story.prologue.done", "eq": true },
+  "objectives": [
+    { "id": "o_wake", "text": "在别人的身体里醒来（六岁）" },
+    { "id": "o_word", "text": "第一次冒出错位词：「……缓存满了。」" },
+    { "id": "o_choice", "text": "决定是否说出「记得另一个世界」" }
+  ],
+  "choices": [
+    {
+      "id": "c_tell",
+      "text": "说出来：告诉阿婆自己记得另一个世界。",
+      "effects": [
+        { "setFlag": "flag.choice.vol1.spokeOut" },
+        { "addBond": { "target": "char.npc.grandma", "delta": 1 } }
+      ],
+      "note": "被当作撞邪，村里请巫祝「叫魂」；第三幕线索更少、更难"
+    },
+    {
+      "id": "c_hide",
+      "text": "藏起来：把碎片埋在心里。",
+      "effects": [{ "addBond": { "target": "char.npc.grandma", "delta": 1 } }],
+      "note": "主角养成「观察与隐忍」的性格，后续对话更沉稳"
+    }
+  ],
+  "dialogues": ["dlg.vol1.prologue"],
+  "encounters": ["encounter.vol1.stray-dogs"],
+  "next": "quest.vol1.village"
+}

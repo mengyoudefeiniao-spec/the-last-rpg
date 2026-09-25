@@ -144,7 +144,7 @@ function emptyFormation(): Formation {
  *
  *   1. 每个单位的行动值按 速度 × gaugeRate 每秒往上走（见 advance）
  *   2. 涨满 100 的单位才能行动：
- *      · 我方 → 挂上 awaitingCommand，**等玩家下指令**（但条不会停，别人照样在攒）
+ *      · 我方 → 挂上 awaitingCommand，**等玩家下指令**（整个战场的时间就此停住）
  *      · 敌方 → 立即由 AI 行动
  *   3. 行动完条归零，从头再攒
  *
@@ -267,7 +267,9 @@ export class Battle {
    * **时间由外部注入**：服务端按节拍调用，测试直接喂一大段 deltaMs。
    * 一大段会被切成 gaugeStep 的小步，免得一步就跨过「谁先到行动点」的细节。
    *
-   * 正在等待玩家指令的单位不再推进 —— 它已经到终点了。
+   * 我方有单位在等指令时，**整个战场的时间停住** —— 敌我的行动值都不再涨，直到指令下完。
+   * 这是刻意的：不该出现「你还在斟酌，敌人却偷跑一轮」。
+   * 停的是**行动值**；演出的动画该播还是照播，那是两回事。
    */
   async advance(deltaMs: number): Promise<void> {
     if (this.phase !== 'battle' || this.finished || this.busy) return;
@@ -277,6 +279,9 @@ export class Battle {
       let remaining = deltaMs / 1000;
 
       while (remaining > 0 && this.phase === 'battle' && !this.finished) {
+        // 有人在等我方指令 —— 整个战场的时间停住，等他决定
+        if (this.awaitingUnits.length > 0) break;
+
         const step = Math.min(remaining, BALANCE.gaugeStep);
         remaining -= step;
 
@@ -301,9 +306,9 @@ export class Battle {
   /**
    * 处理所有条已满的单位。
    *
-   * 我方条满 → 挂上 awaitingCommand 就**不再阻塞推进**：你犹豫的时候，别人的条照样在涨，
-   * 敌人可能先到点先动手。这正是仙剑 3 那种紧张感的来源，也是这个玩法的核心。
-   * 敌方条满 → 立刻由 AI 行动。
+   * 我方条满 → 挂上 awaitingCommand 后**立刻收手**：这一拍就到此为止，整个战场停下等指令，
+   * 排在后面的敌方单位也不许出手。
+   * 敌方条满 → 立刻由 AI 行动（前提是没有我方单位正在等指令）。
    */
   private async processReadyUnits(): Promise<void> {
     for (const unit of this.units) {
@@ -316,7 +321,7 @@ export class Battle {
 
         unit.awaitingCommand = true;
         this.logIt('phase', `${unit.name} 的行动条已满 —— 等待你的指令`);
-        continue;
+        return;
       }
 
       await this.takeTurn(unit, chooseEnemyAction(unit, this.units, this.rng));

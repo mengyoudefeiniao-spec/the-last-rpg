@@ -1,0 +1,93 @@
+{
+  "id": "char.hero",
+  "name": "沈述",
+  "kind": "hero",
+  "summary": "现实世界的独立游戏开发者，死后灵魂坠入大衍界，成为忘川不认的「畸轮者」；四百年间转生七世。",
+  "doc": "docs/20-人物/主角.md",
+  "generations": [
+    {
+      "gen": 0,
+      "name": "沈述",
+      "gender": "male",
+      "origin": "现实世界 · 独立游戏开发者（28 岁）",
+      "debutStory": "story.prologue"
+    },
+    {
+      "gen": 1,
+      "id": "char.hero.lingyue",
+      "name": "凌越",
+      "gender": "male",
+      "origin": "东荒青芜村孤儿 / 凡骨（极劣灵根）",
+      "commands": ["attack", "spell", "defend", "flee"],
+      "realmCap": "引灵后期",
+      "debutStory": "story.vol1"
+    },
+    {
+      "gen": 2,
+      "id": "char.hero.xiewuyi",
+      "name": "谢无衣",
+      "gender": "male",
+      "origin": "太玄剑宗外门弟子 / 上等灵根",
+      "commands": ["attack", "skill", "spiritTreasure", "defend", "flee"],
+      "realmCap": "金丹",
+      "debutStory": "story.vol2"
+    },
+    {
+      "gen": 3,
+      "id": "char.hero.diqing",
+      "name": "荻青",
+      "gender": "male",
+      "origin": "清源观符师 / 中等灵根",
+      "commands": ["attack", "talisman", "defend", "flee"],
+      "realmCap": "金丹",
+      "debutStory": "story.vol3"
+    },
+    {
+      "gen": 4,
+      "id": "char.hero.tuobaye",
+      "name": "拓跋野",
+      "gender": "male",
+      "origin": "西荒蛮族少年 / 中等灵根",
+      "commands": ["attack", "capture", "summon", "defend", "flee"],
+      "realmCap": "凝罡",
+      "debutStory": "story.vol4"
+    },
+    {
+      "gen": 5,
+      "id": "char.hero.shenwudu",
+      "name": "沈无渡",
+      "gender": "male",
+      "origin": "血河宗魔修 / 上等灵根",
+      "commands": ["attack", "spell", "defend", "flee"],
+      "systems": ["soul-refining"],
+      "realmCap": "元婴",
+      "debutStory": "story.vol5"
+    },
+    {
+      "gen": 6,
+      "id": "char.hero.liumian",
+      "name": "柳眠",
+      "gender": "female",
+      "origin": "中州凡人女子 / 无灵根",
+      "commands": ["attack", "defend", "flee"],
+      "systems": ["formation"],
+      "realmCap": "无",
+      "debutStory": "story.vol6"
+    },
+    {
+      "gen": 7,
+      "name": "沈述",
+      "gender": "unknown",
+      "origin": "？（由玩家决定）",
+      "commands": ["attack", "spell", "skill", "talisman", "spiritTreasure", "summon", "capture", "defend", "flee"],
+      "systems": ["soul-refining", "formation"],
+      "realmCap": "化神",
+      "debutStory": "story.vol7"
+    }
+  ],
+  "relations": [
+    { "target": "char.suzhao", "kind": "bond", "note": "跨世羁绊 / 情感线" },
+    { "target": "char.yunhe", "kind": "master", "note": "第一世的引路人；守碑人" },
+    { "target": "char.yinwujiu", "kind": "rival", "note": "宿敌 / 镜像" }
+  ]
+}

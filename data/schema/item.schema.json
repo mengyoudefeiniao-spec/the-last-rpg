@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://the-last-rpg/schema/item.schema.json",
+  "title": "道具（Item）",
+  "type": "object",
+  "required": ["id", "name", "kind"],
+  "properties": {
+    "id": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "name": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/LocalizedText" },
+    "kind": {
+      "enum": ["key", "consumable", "material", "equipment", "currency"],
+      "description": "key=关键道具（不可丢）· consumable · material · equipment · currency"
+    },
+    "desc": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/LocalizedText" },
+    "doc": { "type": "string" },
+    "crossGeneration": {
+      "type": "boolean",
+      "default": false,
+      "description": "是否跨世携带 / 回响（如本命灵宝、碑残段、平安符）"
+    },
+    "grantsSkill": { "type": "string" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,41 @@
+{
+  "id": "char.suzhao",
+  "name": "苏昭",
+  "kind": "companion",
+  "summary": "常轮者（正常转世、每世被洗忆）。灵魂底色不变：左手腕有缺月形胎记；总把最重要的话留到最后；对「天黑前一定要回家」有莫名执念。",
+  "doc": "docs/20-人物/同伴/苏昭.md",
+  "generations": [
+    {
+      "gen": 1,
+      "name": "苏昭",
+      "gender": "female",
+      "origin": "东荒 · 青芜村的采药少女",
+      "debutStory": "story.vol1"
+    },
+    {
+      "gen": 2,
+      "name": "（外门女弟子）",
+      "gender": "female",
+      "origin": "太玄剑宗外门",
+      "debutStory": "story.vol2"
+    },
+    {
+      "gen": 4,
+      "name": "（可汗之女）",
+      "gender": "female",
+      "origin": "西荒蛮族",
+      "debutStory": "story.vol4"
+    },
+    {
+      "gen": 6,
+      "name": "（宫女）",
+      "gender": "female",
+      "origin": "大衍朝宫城",
+      "debutStory": "story.vol6"
+    }
+  ],
+  "relations": [
+    { "target": "char.hero", "kind": "bond", "note": "每世重新相识；主角每世都要重新「遇见」她" },
+    { "target": "char.yinwujiu", "kind": "rival", "note": "她的前身，是殷无咎守了三千年的人（第七世揭示）" }
+  ]
+}

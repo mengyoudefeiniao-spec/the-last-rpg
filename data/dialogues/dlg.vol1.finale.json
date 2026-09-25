@@ -1,0 +1,79 @@
+{
+  "id": "dlg.vol1.finale",
+  "scene": "story.vol1",
+  "doc": "docs/30-剧情/主线/第一卷-青芜山下.md",
+  "nodes": [
+    {
+      "id": "n_collapse",
+      "speaker": "narration",
+      "text": "山体崩塌。村口的路断成两截，碎石像浪一样吞向村子。",
+      "goto": "n_suzhao"
+    },
+    {
+      "id": "n_suzhao",
+      "speaker": "char.suzhao",
+      "text": "凌越，天黑前一定要回家。",
+      "tags": ["fragmentEcho"],
+      "goto": "n_choice"
+    },
+    {
+      "id": "n_choice",
+      "speaker": "narration",
+      "text": "（你已经到了引灵境的极限。你救不了所有人。）",
+      "choices": [
+        {
+          "id": "c_save_suzhao",
+          "text": "先救苏昭。",
+          "goto": "n_dead",
+          "effects": [{ "addBond": { "target": "char.suzhao", "delta": 2 } }]
+        },
+        {
+          "id": "c_save_village",
+          "text": "先救村民。",
+          "goto": "n_dead",
+          "effects": [{ "setValue": { "flag": "flag.vol1.kepthPromise", "value": false } }]
+        },
+        {
+          "id": "c_stele",
+          "text": "冲回去拿那半块碑残段。",
+          "requires": { "flag": "flag.vol1.villainEscaped", "eq": false },
+          "goto": "n_dead",
+          "effects": [
+            { "setFlag": "flag.vol1.carriedStele" },
+            { "giveItem": "item.vol1.stele-fragment" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "n_dead",
+      "speaker": "narration",
+      "text": "他死了。灵魂离体，第一次看见「界间」——两世之间的虚空。",
+      "goto": "n_soul"
+    },
+    {
+      "id": "n_soul",
+      "speaker": "narration",
+      "text": "在界间，残魂第一次变得完整。他想起了自己的名字，和那款没做完的游戏。他想起来的第一句话，是最后一次合上电脑时说的：「……保存一下。」",
+      "tags": ["worldSoul"],
+      "effects": [
+        { "collectSoul": "soul.world-soul.1" },
+        { "addValue": { "flag": "flag.soul.worldSouls", "delta": 1 } },
+        { "setFlag": "flag.awareness.distorted" }
+      ],
+      "goto": "n_voice"
+    },
+    {
+      "id": "n_voice",
+      "speaker": "voice",
+      "text": "别急着走。你还没想起来——你为什么会在这里。",
+      "goto": "n_teaser"
+    },
+    {
+      "id": "n_teaser",
+      "speaker": "narration",
+      "text": "（下一世，你会失去这一世的法术。）",
+      "tags": ["nextGenerationTeaser"]
+    }
+  ]
+}

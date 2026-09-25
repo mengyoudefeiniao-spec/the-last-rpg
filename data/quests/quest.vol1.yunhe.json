@@ -1,0 +1,39 @@
+{
+  "id": "quest.vol1.yunhe",
+  "story": "story.vol1",
+  "title": "第二幕 · 云鹤与碑",
+  "kind": "main",
+  "targetMinutes": 25,
+  "prereq": ["quest.vol1.village"],
+  "objectives": [
+    { "id": "o_meet", "text": "云鹤云游至青芜村，识出凌越的不寻常" },
+    { "id": "o_apprentice", "text": "拜入云鹤门下，学引灵之法——学会「法术」" },
+    { "id": "o_stele", "text": "随云鹤进山，见到轮回碑残段" }
+  ],
+  "choices": [
+    {
+      "id": "c_ask_distorted",
+      "text": "追问：我是不是「畸轮」？",
+      "effects": [{ "addValue": { "flag": "flag.trust.yunhe", "delta": 1 } }],
+      "note": "云鹤摇头不答，但记下了这个问题"
+    },
+    {
+      "id": "c_ask_suzhao",
+      "text": "转而问苏昭的事。",
+      "effects": [{ "addBond": { "target": "char.suzhao", "delta": 1 } }],
+      "note": "云鹤若有所思：「你倒先想着别人。」"
+    },
+    {
+      "id": "c_ask_nothing",
+      "text": "什么都不问。",
+      "effects": [],
+      "note": "云鹤反而更忧心"
+    }
+  ],
+  "dialogues": ["dlg.vol1.yunhe-stele"],
+  "onComplete": [
+    { "unlockSkill": "skill.spell" },
+    { "addBond": { "target": "char.yunhe", "delta": 1 } }
+  ],
+  "next": "quest.vol1.shadow"
+}

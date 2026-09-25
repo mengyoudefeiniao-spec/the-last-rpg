@@ -1,0 +1,20 @@
+{
+  "id": "char.yunhe",
+  "name": "云鹤真人",
+  "kind": "companion",
+  "summary": "守碑人，长生者（永失轮回）。外表六十余岁，实际逾三千岁。能辨识「畸轮」，但受职责所限——不能说、不能救，只能看。",
+  "doc": "docs/20-人物/同伴/守碑人·云鹤真人.md",
+  "generations": [
+    {
+      "gen": 1,
+      "name": "云鹤真人",
+      "gender": "male",
+      "origin": "守碑人；云游至青芜村，收凌越为徒",
+      "debutStory": "story.vol1"
+    }
+  ],
+  "relations": [
+    { "target": "char.hero", "kind": "master", "note": "亦师亦友；唯一知道主角真相的人" },
+    { "target": "char.yinwujiu", "kind": "colleague", "note": "封蚀之战的同代人；立场相反、互相敬重" }
+  ]
+}

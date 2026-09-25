@@ -94,7 +94,10 @@ export class BattleMirror {
   displayGauge(unit: UnitSnapshot): number {
     const base = this.gaugeBase.get(unit.id);
     if (!base) return unit.gauge;
-    if (unit.awaitingCommand) return base.value;
+
+    // 有人在等我方指令时，整个战场的时间是停的 —— 插值也得跟着停，
+    // 否则条会自己往前爬，看起来就像「敌方趁你思考时偷偷在攒」。
+    if (this.awaitingUnitIds.length > 0) return base.value;
 
     const elapsed = (performance.now() - base.at) / 1000;
     return Math.min(BALANCE.gaugeMax, base.value + unit.gaugePerSecond * elapsed);

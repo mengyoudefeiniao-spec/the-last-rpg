@@ -1,0 +1,31 @@
+{
+  "id": "quest.vol1.shadow",
+  "story": "story.vol1",
+  "title": "第三幕 · 山下的阴影",
+  "kind": "main",
+  "targetMinutes": 20,
+  "prereq": ["quest.vol1.yunhe"],
+  "objectives": [
+    { "id": "o_predict", "text": "用残魂的预感多次预警，成为村中的主心骨" },
+    { "id": "o_truth", "text": "查明妖兽之乱背后的人为推手" }
+  ],
+  "choices": [
+    {
+      "id": "c_expose",
+      "text": "拆穿幕后人（需集齐前两幕线索）。",
+      "effects": [
+        { "addValue": { "flag": "flag.trust.yunhe", "delta": 1 } },
+        { "addBond": { "target": "char.yunhe", "delta": 1 } }
+      ],
+      "note": "幕后人暴露，但云鹤必须出手（违职），被碑反噬"
+    },
+    {
+      "id": "c_save",
+      "text": "优先救人：放弃追查，全力疏散村民。",
+      "effects": [{ "setFlag": "flag.vol1.villainEscaped" }],
+      "note": "幕后人带着碑残段逃走——第七世回收：这块残段回到主角手中"
+    }
+  ],
+  "encounters": ["encounter.vol1.beast-tide"],
+  "next": "quest.vol1.finale"
+}

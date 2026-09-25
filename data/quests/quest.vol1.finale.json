@@ -1,0 +1,43 @@
+{
+  "id": "quest.vol1.finale",
+  "story": "story.vol1",
+  "title": "终幕 · 天黑前回家",
+  "kind": "main",
+  "targetMinutes": 10,
+  "prereq": ["quest.vol1.shadow"],
+  "objectives": [
+    { "id": "o_collapse", "text": "青芜山地脉崩塌" },
+    { "id": "o_choice", "text": "做最后一件事" }
+  ],
+  "choices": [
+    {
+      "id": "c_save_suzhao",
+      "text": "先救苏昭。",
+      "effects": [{ "addBond": { "target": "char.suzhao", "delta": 2 } }],
+      "note": "她活下来（转生为第二世的师姐）；凌越力竭而死"
+    },
+    {
+      "id": "c_save_village",
+      "text": "先救村民。",
+      "effects": [{ "setValue": { "flag": "flag.vol1.kepthPromise", "value": false } }],
+      "note": "苏昭与村民皆活，但这一世的「约定」被打破"
+    },
+    {
+      "id": "c_stele",
+      "text": "冲回去拿那半块碑残段。",
+      "requires": { "flag": "flag.vol1.villainEscaped", "eq": false },
+      "effects": [
+        { "setFlag": "flag.vol1.carriedStele" },
+        { "giveItem": "item.vol1.stele-fragment" }
+      ],
+      "note": "若第三幕选过「优先救人」，碑残段已被抢走 → 此选项灰掉"
+    }
+  ],
+  "dialogues": ["dlg.vol1.finale"],
+  "onComplete": [
+    { "collectSoul": "soul.world-soul.1" },
+    { "addValue": { "flag": "flag.soul.worldSouls", "delta": 1 } },
+    { "setFlag": "flag.awareness.distorted" },
+    { "setFlag": "story.vol1.done" }
+  ]
+}

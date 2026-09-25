@@ -1,0 +1,14 @@
+{
+  "id": "encounter.vol1.stray-dogs",
+  "story": "story.vol1",
+  "terrain": "plain",
+  "units": [
+    {
+      "id": "dog-1",
+      "name": "村口的野狗",
+      "side": "enemy",
+      "stats": { "maxHp": 18, "maxMp": 0, "maxSp": 10, "atk": 5, "def": 2, "mag": 0, "res": 1, "spd": 7 }
+    }
+  ],
+  "note": "序幕的教学战斗：此时主角只有「普通攻击 / 防御 / 逃跑」——刻意让玩家想找「法术」却找不到。"
+}

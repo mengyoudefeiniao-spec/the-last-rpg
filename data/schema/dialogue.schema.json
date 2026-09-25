@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://the-last-rpg/schema/dialogue.schema.json",
+  "title": "对话脚本（Dialogue）",
+  "type": "object",
+  "required": ["id", "nodes"],
+  "properties": {
+    "id": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "scene": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "doc": { "type": "string", "description": "对应的对话脚本文档（项目根相对路径）" },
+    "enter": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Condition" },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "description": "节点 id，如 n_start" },
+          "speaker": {
+            "type": "string",
+            "description": "说话人：char.* ID；旁白用 narration；不明声音用 voice"
+          },
+          "text": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/LocalizedText" },
+          "effects": {
+            "type": "array",
+            "items": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Effect" }
+          },
+          "choices": {
+            "type": "array",
+            "items": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Choice" }
+          },
+          "goto": { "type": "string", "description": "下一个节点 id；缺省表示结束" },
+          "tags": {
+            "type": "array",
+            "description": "演出标记（UI 据此做特殊处理）",
+            "items": {
+              "enum": [
+                "misplacedWord",
+                "fragmentEcho",
+                "soulFragment",
+                "worldSoul",
+                "nextGenerationTeaser",
+                "ending"
+              ]
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,13 @@
+{
+  "id": "skill.spell",
+  "name": "法术",
+  "source": "spell",
+  "commandId": "spell",
+  "desc": "以灵力外放，驭天地之火、水、雷、风。第一世凌越拜入云鹤门下后学会的第一项本事。",
+  "cost": { "mp": 8 },
+  "params": {
+    "power": 1.4,
+    "damageKind": "magical",
+    "note": "威力基准见 docs/40-玩法设计/战斗与成长.md 第三节（可调）"
+  }
+}

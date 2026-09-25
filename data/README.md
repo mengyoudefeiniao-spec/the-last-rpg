@@ -31,3 +31,28 @@
 2. **交叉引用检查**——例如任务引用的 NPC、地图布点的 NPC、掉落表引用的道具是否真实存在。
 
 建议每次提交前跑一次。接入测试框架后，由 `tests/` 固化这条检查。
+
+## 当前状态
+
+### 已建立的 schema（8 个）
+
+`common` · `character` · `quest` · `dialogue` · `story` · `encounter` · `item` · `skill`
+
+### 已完成的数据（序章 + 第一卷）
+
+| 目录 | 内容 |
+| --- | --- |
+| `characters/` | `char.hero`（主角跨世档案，含七世身份与可用指令）、`char.suzhao`、`char.yunhe` |
+| `story/` | `story.prologue`、`story.vol1` |
+| `quests/` | 序章 4 个 + 第一卷 5 个主线 + 1 个支线（`quest.side.caravan`） |
+| `dialogues/` | `dlg.vol1.prologue`、`dlg.vol1.yunhe-stele`、`dlg.vol1.finale` |
+| `encounters/` | 第一卷 3 场（野狗 / 野猪群 / 妖兽之乱） |
+| `items/` | 轮回碑残段、平安符 |
+| `skills/` | 法术（`skill.spell`）、缓存体（`skill.soul.cache`） |
+| `i18n/` | `zh-CN`（样例，key 格式：`<实体 id>.<节点 id>.<字段>`） |
+
+### 已知待补
+
+- `story.vol1.next` → `story.vol2`：**第二卷数据未做**，跨章引用暂悬空（正常）。
+- `maps/` 尚无数据：第一卷「隐藏洞窟」的布点待补。
+- 第二至七世的 NPC / 任务 / 对话尚未导出（主角各世身份已写在 `char.hero` 内）。

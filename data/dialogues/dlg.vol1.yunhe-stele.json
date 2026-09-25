@@ -1,0 +1,97 @@
+{
+  "id": "dlg.vol1.yunhe-stele",
+  "scene": "story.vol1",
+  "doc": "docs/30-剧情/对话脚本/第一世-碑前的问答.md",
+  "enter": { "flag": "flag.awareness.distorted", "eq": false },
+  "nodes": [
+    {
+      "id": "n_start",
+      "speaker": "narration",
+      "text": "云鹤走在前头，木杖点着石阶。山雾很大，凌越却觉得这条路——走过。",
+      "goto": "n_stele"
+    },
+    {
+      "id": "n_stele",
+      "speaker": "narration",
+      "text": "一块半埋的青石，字迹被苔藓吃去大半。走近时，他耳朵里「嗡」地一响——一瞬的闪光里，他看见一个穿着奇怪衣服的人，低头对着一块会发光的板子叹气。",
+      "tags": ["fragmentEcho"],
+      "goto": "n_yunhe_1"
+    },
+    {
+      "id": "n_yunhe_1",
+      "speaker": "char.yunhe",
+      "text": "你刚才，说了个什么词？",
+      "choices": [
+        { "id": "c_deny", "text": "「……没什么。」", "goto": "n_deny" },
+        { "id": "c_admit", "text": "「我好像……以前来过这里。」", "goto": "n_admit" },
+        { "id": "c_stone", "text": "「这石头，在说话。」", "goto": "n_stone_speaks" }
+      ]
+    },
+    {
+      "id": "n_deny",
+      "speaker": "char.yunhe",
+      "text": "撒谎的孩子，眉毛会动。你刚才说的那个词，老朽活了三千年，没听过。",
+      "goto": "n_yunhe_key"
+    },
+    {
+      "id": "n_admit",
+      "speaker": "char.yunhe",
+      "text": "来过？你今年十四。……有意思。不是「记得」，是「认得」。",
+      "effects": [{ "addValue": { "flag": "flag.trust.yunhe", "delta": 1 } }],
+      "goto": "n_yunhe_key"
+    },
+    {
+      "id": "n_stone_speaks",
+      "speaker": "char.yunhe",
+      "text": "（第一次收起了笑）你说什么？……孩子，站远些。",
+      "effects": [
+        { "addValue": { "flag": "flag.trust.yunhe", "delta": 1 } },
+        { "setFlag": "flag.choice.vol1.stoneHeard" }
+      ],
+      "goto": "n_knowledge_q"
+    },
+    {
+      "id": "n_knowledge_q",
+      "speaker": "char.yunhe",
+      "text": "你问过我，人死后去哪。都去过忘川。洗掉记得的，忘掉舍不得的，然后重新做人。……可有些魂，忘川不收。",
+      "choices": [
+        { "id": "c_name", "text": "「那种魂，叫什么？」", "goto": "n_answer" },
+        { "id": "c_me", "text": "「那……我会不会就是？」", "goto": "n_self_doubt" },
+        { "id": "c_you", "text": "「师父，你怎么知道这些？」", "goto": "n_about_yunhe" }
+      ]
+    },
+    {
+      "id": "n_answer",
+      "speaker": "char.yunhe",
+      "text": "有个老词，叫「畸轮」。他们的记忆不会消失，只会碎——碎成一片一片，散在过去，也散在将来。老朽管那些碎片叫……「残魂」。捡得回来，人就还是那个人。",
+      "effects": [{ "setFlag": "flag.memory.learnedSoulFragment" }],
+      "goto": "n_yunhe_key"
+    },
+    {
+      "id": "n_self_doubt",
+      "speaker": "char.yunhe",
+      "text": "（长久地沉默）……孩子，我答不了你。我守了三千年的东西，或许就是在等一个你。",
+      "effects": [{ "addValue": { "flag": "flag.trust.yunhe", "delta": 1 } }],
+      "goto": "n_yunhe_key"
+    },
+    {
+      "id": "n_about_yunhe",
+      "speaker": "char.yunhe",
+      "text": "徒弟问师父的底细，是不合规矩的。不过……我确实活得太久了。久到，我忘了自己是谁。",
+      "effects": [{ "setFlag": "flag.yunhe.hinted" }],
+      "goto": "n_yunhe_key"
+    },
+    {
+      "id": "n_yunhe_key",
+      "speaker": "char.yunhe",
+      "text": "回去吧。天黑前一定要到家。（凌越一愣——这句话，他好像在哪儿听过。）",
+      "effects": [{ "setFlag": "flag.bond.suzhao_hint" }],
+      "goto": "n_end"
+    },
+    {
+      "id": "n_end",
+      "speaker": "narration",
+      "text": "下山的路，比来时短。他回头看了一眼那块石头。它安安静静的，像什么都没说过。"
+    }
+  ]
+}

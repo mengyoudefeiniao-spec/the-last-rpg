@@ -1,0 +1,38 @@
+{
+  "id": "story.vol1",
+  "title": "第一世 · 青芜山下",
+  "generation": 1,
+  "targetMinutes": 90,
+  "chapterDoc": "docs/30-剧情/主线/第一卷-青芜山下.md",
+  "prev": "story.prologue",
+  "next": "story.vol2",
+  "quests": [
+    "quest.vol1.prologue",
+    "quest.vol1.village",
+    "quest.vol1.yunhe",
+    "quest.vol1.shadow",
+    "quest.vol1.finale"
+  ],
+  "playableCommands": ["attack", "spell", "defend", "flee"],
+  "playableSystems": [],
+  "soul": {
+    "worldSoul": "soul.world-soul.1",
+    "driftingSouls": ["soul.drifting.cache"]
+  },
+  "flags": [
+    { "id": "flag.choice.vol1.spokeOut", "type": "bool", "default": false, "desc": "序幕：是否把「记得另一个世界」说出来" },
+    { "id": "flag.choice.vol1.trustedForeboding", "type": "bool", "default": false, "desc": "第一幕：是否相信残魂的预感、提前拦住苏昭" },
+    { "id": "flag.choice.vol1.stoneHeard", "type": "bool", "default": false, "desc": "第二幕：是否说「这石头在说话」" },
+    { "id": "flag.vol1.villainEscaped", "type": "bool", "default": false, "desc": "第三幕：选择「优先救人」→ 碑残段被夺" },
+    { "id": "flag.vol1.carriedStele", "type": "bool", "default": false, "desc": "终幕：冲回去拿碑残段" },
+    { "id": "flag.vol1.kepthPromise", "type": "bool", "default": true, "desc": "终幕：是否守住了「天黑前回家」的约定" },
+    { "id": "flag.bond.grandma", "type": "int", "default": 0, "desc": "与阿婆的羁绊" },
+    { "id": "flag.bond.yunhe", "type": "int", "default": 0, "desc": "与云鹤的羁绊" },
+    { "id": "flag.trust.yunhe", "type": "int", "default": 0, "desc": "云鹤的信任" },
+    { "id": "flag.bond.suzhao", "type": "int", "default": 0, "desc": "与苏昭的羁绊（跨世累积）", "crossGeneration": true },
+    { "id": "flag.bond.suzhao_hint", "type": "bool", "default": false, "desc": "「天黑前回家」这句话的第一次异样", "crossGeneration": true },
+    { "id": "flag.awareness.distorted", "type": "bool", "default": false, "desc": "是否确认自己是畸轮（终幕置真）", "crossGeneration": true },
+    { "id": "flag.soul.worldSouls", "type": "int", "default": 0, "desc": "已归位的世魂数", "crossGeneration": true },
+    { "id": "flag.soul.drifting", "type": "int", "default": 0, "desc": "已拾得的游魂数", "crossGeneration": true }
+  ]
+}

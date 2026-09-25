@@ -1,0 +1,21 @@
+{
+  "id": "encounter.vol1.boars",
+  "story": "story.vol1",
+  "terrain": "plain",
+  "units": [
+    {
+      "id": "boar-1",
+      "name": "受惊的野猪",
+      "side": "enemy",
+      "stats": { "maxHp": 40, "maxMp": 0, "maxSp": 20, "atk": 9, "def": 4, "mag": 0, "res": 2, "spd": 6 }
+    },
+    {
+      "id": "boar-2",
+      "name": "受惊的野猪",
+      "side": "enemy",
+      "stats": { "maxHp": 40, "maxMp": 0, "maxSp": 20, "atk": 9, "def": 4, "mag": 0, "res": 2, "spd": 6 }
+    }
+  ],
+  "rewards": { "currency": { "spiritstone": 3 } },
+  "note": "第一幕教学战斗。数量由 rng 决定（2–3 只）；若玩家第一幕选了「相信预感」，数量与攻击目标会重新随机。"
+}

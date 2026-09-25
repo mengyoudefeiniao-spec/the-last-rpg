@@ -1,0 +1,63 @@
+{
+  "id": "dlg.vol1.prologue",
+  "scene": "story.vol1",
+  "doc": "docs/30-剧情/主线/第一卷-青芜山下.md",
+  "enter": { "flag": "story.prologue.done", "eq": true },
+  "nodes": [
+    {
+      "id": "n_wake",
+      "speaker": "narration",
+      "text": "他睁开眼，在一个六岁孩子的身体里。屋外有鸡叫，是这个世界的声音。",
+      "goto": "n_word"
+    },
+    {
+      "id": "n_word",
+      "speaker": "char.hero.lingyue",
+      "text": "……我没事，就是……缓存满了。",
+      "tags": ["misplacedWord"],
+      "goto": "n_grandma"
+    },
+    {
+      "id": "n_grandma",
+      "speaker": "char.npc.grandma",
+      "text": "……「缓存」？那是啥？",
+      "goto": "n_choice"
+    },
+    {
+      "id": "n_choice",
+      "speaker": "narration",
+      "text": "（你在心里挣扎了一下。）",
+      "choices": [
+        {
+          "id": "c_tell",
+          "text": "说出来：告诉阿婆自己记得另一个世界。",
+          "goto": "n_tell",
+          "effects": [{ "setFlag": "flag.choice.vol1.spokeOut" }]
+        },
+        {
+          "id": "c_hide",
+          "text": "藏起来：把碎片埋在心里。",
+          "goto": "n_hide"
+        }
+      ]
+    },
+    {
+      "id": "n_tell",
+      "speaker": "char.npc.grandma",
+      "text": "……阿婆信你。别怕，啊？",
+      "goto": "n_end"
+    },
+    {
+      "id": "n_hide",
+      "speaker": "narration",
+      "text": "他把那句话咽了回去——从今天起，他学会了先看，再开口。",
+      "goto": "n_end"
+    },
+    {
+      "id": "n_end",
+      "speaker": "narration",
+      "text": "阿婆没再问，只是把他搂紧了些。",
+      "effects": [{ "addBond": { "target": "char.npc.grandma", "delta": 1 } }]
+    }
+  ]
+}

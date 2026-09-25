@@ -1,0 +1,30 @@
+{
+  "id": "quest.prologue.play",
+  "story": "story.prologue",
+  "title": "幕 2 · 《The Last RPG》",
+  "kind": "tutorial",
+  "targetMinutes": 25,
+  "prereq": ["quest.prologue.day"],
+  "objectives": [
+    { "id": "o_play", "text": "玩一遍沈述做的游戏（学会 RPG 基本操作）" },
+    { "id": "o_battle", "text": "打完那一场回合制小战斗" },
+    { "id": "o_door", "text": "走到那扇门前，做出选择" }
+  ],
+  "choices": [
+    {
+      "id": "c_together",
+      "text": "和同伴一起推门。",
+      "effects": [{ "setFlag": "flag.prologue.pushedTogether" }],
+      "note": "第七世镇蚀开场的呼应"
+    },
+    {
+      "id": "c_alone",
+      "text": "让同伴留在门外。",
+      "effects": [],
+      "note": "第七世「独自承担」的伏笔"
+    }
+  ],
+  "onComplete": [{ "setFlag": "quest.prologue.play.done" }],
+  "next": "quest.prologue.death",
+  "note": "本幕刻意用 1-bit 粗像素画风，与主游戏区分（元叙事需要）。"
+}

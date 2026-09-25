@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://the-last-rpg/schema/encounter.schema.json",
+  "title": "遭遇（Encounter）",
+  "description": "战斗编组。单位属性对齐 src/shared/data/types.ts 的 Stats。",
+  "type": "object",
+  "required": ["id", "units"],
+  "properties": {
+    "id": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "story": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Id" },
+    "terrain": {
+      "enum": ["plain", "snow", "flame", "spring", "miasma"],
+      "description": "对齐 src 的 TerrainKind"
+    },
+    "units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "side"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/LocalizedText" },
+          "side": { "enum": ["ally", "enemy"] },
+          "stats": {
+            "type": "object",
+            "required": ["maxHp", "maxMp", "maxSp"],
+            "properties": {
+              "maxHp": { "type": "number" },
+              "maxMp": { "type": "number" },
+              "maxSp": { "type": "number" },
+              "atk": { "type": "number" },
+              "def": { "type": "number" },
+              "mag": { "type": "number" },
+              "res": { "type": "number" },
+              "spd": { "type": "number" }
+            },
+            "additionalProperties": false
+          },
+          "statuses": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "开场自带状态（对齐 StatusDef.id）"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "rewards": { "$ref": "https://the-last-rpg/schema/common.schema.json#/$defs/Reward" },
+    "note": { "type": "string", "description": "给设计者的说明（不进游戏）" }
+  },
+  "additionalProperties": false
+}

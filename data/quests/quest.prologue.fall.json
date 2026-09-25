@@ -1,0 +1,15 @@
+{
+  "id": "quest.prologue.fall",
+  "story": "story.prologue",
+  "title": "幕 4 · 坠落",
+  "kind": "main",
+  "targetMinutes": 5,
+  "prereq": ["quest.prologue.death"],
+  "objectives": [
+    { "id": "o_fall", "text": "灵魂离体，穿过模糊的光" },
+    { "id": "o_wangchuan", "text": "忘川在远处一闪而过——但不接纳他" }
+  ],
+  "choices": [],
+  "onComplete": [{ "setFlag": "story.prologue.done" }],
+  "note": "过场：声音说「又一个……不属于这里的。」→ 转场 story.vol1"
+}
