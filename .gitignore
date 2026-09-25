@@ -18,6 +18,9 @@ yarn-error.log*
 tmp/
 scratch/
 
+# 工具产物
+.reasonix/
+
 # 系统文件
 .DS_Store
 Thumbs.db

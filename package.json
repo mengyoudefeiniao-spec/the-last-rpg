@@ -1,0 +1,19 @@
+{
+  "name": "the-last-rpg",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "The Last RPG —— 回合制 RPG（浏览器 / TypeScript）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/battle.spec.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1"
+  }
+}

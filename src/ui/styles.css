@@ -1,0 +1,452 @@
+/* The Last RPG —— 战斗界面样式 */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0b0e14;
+  --panel: #151b26;
+  --panel-2: #1c2432;
+  --line: #2b3648;
+  --text: #d9e1ef;
+  --text-dim: #8695ad;
+
+  --hp: #d8483f;
+  --mp: #4a86d8;
+  --sp: #e0a030;
+
+  --ally: #4ec9b0;
+  --enemy: #e06c75;
+  --buff: #5ec26a;
+  --debuff: #c76bd8;
+
+  --radius: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at 50% -20%, #1c2740 0%, var(--bg) 65%);
+  color: var(--text);
+  font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+#app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+/* ------------------------------- 顶栏 ------------------------------- */
+
+.battle__header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.battle__turn {
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.battle__phase {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.battle__restart {
+  margin-left: auto;
+  padding: 6px 14px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.battle__restart:hover {
+  border-color: var(--ally);
+  color: var(--ally);
+}
+
+/* ------------------------------ 主体布局 ------------------------------ */
+
+.battle__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.battle__field {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.side {
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.side--enemy {
+  border-left: 3px solid var(--enemy);
+}
+
+.side--ally {
+  border-left: 3px solid var(--ally);
+}
+
+.side__title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+}
+
+.side__units {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* ------------------------------ 单位卡片 ------------------------------ */
+
+.unit {
+  flex: 1 1 220px;
+  min-width: 220px;
+  padding: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  transition: border-color 0.15s, box-shadow 0.15s, opacity 0.2s;
+}
+
+.unit--ally {
+  border-top: 2px solid rgba(78, 201, 176, 0.5);
+}
+
+.unit--enemy {
+  border-top: 2px solid rgba(224, 108, 117, 0.5);
+}
+
+/* 当前正在下指令的单位 */
+.unit--active {
+  border-color: var(--ally);
+  box-shadow: 0 0 0 1px var(--ally), 0 0 18px rgba(78, 201, 176, 0.25);
+}
+
+/* 等待选择目标时的敌人 */
+.unit--targetable {
+  cursor: crosshair;
+  border-color: var(--enemy);
+  box-shadow: 0 0 0 1px var(--enemy), 0 0 18px rgba(224, 108, 117, 0.3);
+  animation: target-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes target-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px var(--enemy), 0 0 12px rgba(224, 108, 117, 0.25); }
+  50% { box-shadow: 0 0 0 1px var(--enemy), 0 0 26px rgba(224, 108, 117, 0.5); }
+}
+
+.unit--defending {
+  background: linear-gradient(180deg, rgba(74, 134, 216, 0.15), var(--panel-2));
+}
+
+.unit--down {
+  opacity: 0.42;
+  filter: grayscale(0.8);
+}
+
+.unit__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.unit__name {
+  font-weight: 700;
+}
+
+.unit__tag {
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+}
+
+.unit__tag--down {
+  color: var(--enemy);
+}
+
+/* -------------------------------- 条 -------------------------------- */
+
+.bar {
+  position: relative;
+  height: 17px;
+  margin-bottom: 4px;
+  background: #0d1119;
+  border: 1px solid #202939;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.bar__fill {
+  height: 100%;
+  width: 0;
+  transition: width 0.25s ease;
+}
+
+.bar--hp .bar__fill { background: linear-gradient(90deg, #a33, var(--hp)); }
+.bar--mp .bar__fill { background: linear-gradient(90deg, #2c5fa8, var(--mp)); }
+.bar--sp .bar__fill { background: linear-gradient(90deg, #a86f12, var(--sp)); }
+
+.bar__text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #eef3ff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+}
+
+/* ------------------------------ 状态胶囊 ------------------------------ */
+
+.unit__statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.status {
+  padding: 1px 7px;
+  font-size: 11px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  cursor: help;
+}
+
+.status--buff {
+  color: var(--buff);
+  border-color: rgba(94, 194, 106, 0.45);
+  background: rgba(94, 194, 106, 0.12);
+}
+
+.status--debuff {
+  color: var(--debuff);
+  border-color: rgba(199, 107, 216, 0.45);
+  background: rgba(199, 107, 216, 0.12);
+}
+
+/* ------------------------------- 日志 ------------------------------- */
+
+.battle__aside {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.battle__aside-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+}
+
+.battle__log {
+  flex: 1;
+  min-height: 300px;
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-right: 4px;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.log__line {
+  padding: 1px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  word-break: break-word;
+}
+
+.log__line--phase {
+  margin-top: 6px;
+  color: #e8d9a0;
+  font-weight: 700;
+}
+
+.log__line--system {
+  color: #ffcf6b;
+}
+
+.log__line--action {
+  color: #b9c8e0;
+}
+
+.log__line--damage {
+  color: #ff9a92;
+}
+
+.log__line--heal {
+  color: #7fe0a0;
+}
+
+.log__line--status {
+  color: #c9a4ff;
+}
+
+.log__line--resource {
+  color: var(--text-dim);
+}
+
+/* ------------------------------ 底部指令 ------------------------------ */
+
+.battle__footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.battle__hint {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.hint {
+  color: var(--text-dim);
+}
+
+.hint b {
+  color: var(--text);
+}
+
+.hint--done {
+  color: #ffd479;
+  font-weight: 700;
+}
+
+.hint__cancel {
+  margin-left: auto;
+  padding: 4px 12px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.hint__cancel:hover {
+  border-color: var(--enemy);
+  color: var(--enemy);
+}
+
+.battle__commands {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cmd {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  color: var(--text);
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  transition: border-color 0.15s, background 0.15s, transform 0.08s;
+}
+
+.cmd:hover:not(:disabled) {
+  border-color: var(--ally);
+  background: var(--panel-2);
+}
+
+.cmd:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.cmd:disabled,
+.cmd--disabled {
+  color: #5a677d;
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.cmd--armed {
+  border-color: var(--sp);
+  box-shadow: 0 0 0 1px var(--sp) inset;
+}
+
+.cmd__label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+}
+
+.cmd__flag {
+  padding: 0 4px;
+  font-size: 10px;
+  font-style: normal;
+  color: #ffcf6b;
+  border: 1px solid rgba(255, 207, 107, 0.5);
+  border-radius: 3px;
+}
+
+.cmd__cost {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ------------------------------- 窄屏 ------------------------------- */
+
+@media (max-width: 940px) {
+  .battle__body,
+  .battle__footer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .battle__log {
+    max-height: 260px;
+    min-height: 180px;
+  }
+}
