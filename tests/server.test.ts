@@ -53,6 +53,13 @@ class TestClient {
 
     socket.addEventListener('message', (event) => {
       const message = JSON.parse(String(event.data)) as ServerMessage;
+
+      // 扮演一个正常的客户端：收到演出剧本就播完并确认。
+      // 不确认的话，服务端会一直停在「等演出」上 —— 行动条也不再推进。
+      if (message.type === 'snapshot' && message.records.length > 0) {
+        socket.send(JSON.stringify({ type: 'playbackDone' }));
+      }
+
       const waiter = client.waiters.shift();
       if (waiter) waiter(message);
       else client.queue.push(message);
@@ -81,11 +88,39 @@ class TestClient {
     });
   }
 
-  /** 取一条快照，顺便断言类型。 */
-  async nextSnapshot(): Promise<Extract<ServerMessage, { type: 'snapshot' }>> {
-    const message = await this.next();
-    assert.equal(message.type, 'snapshot', `期望快照，实际收到 ${message.type}`);
-    return message as Extract<ServerMessage, { type: 'snapshot' }>;
+  /**
+   * 取下一条指定类型的消息，途中的其它消息直接丢掉。
+   * 开战后服务端每 100ms 就推一条行动条心跳，所以不能假设「下一条就是我要的」。
+   */
+  async nextOfType<T extends ServerMessage['type']>(
+    type: T,
+    guard = 400,
+  ): Promise<Extract<ServerMessage, { type: T }>> {
+    for (let i = 0; i < guard; i += 1) {
+      const message = await this.next();
+      if (message.type === type) return message as Extract<ServerMessage, { type: T }>;
+    }
+    throw new Error(`等了 ${guard} 条消息也没等到 ${type}`);
+  }
+
+  /** 取一条快照。 */
+  nextSnapshot(): Promise<Extract<ServerMessage, { type: 'snapshot' }>> {
+    return this.nextOfType('snapshot');
+  }
+
+  /** 一直等，直到服务端说「有人能行动了」，返回那批单位 id。 */
+  async waitForReadyUnit(guard = 400): Promise<string[]> {
+    for (let i = 0; i < guard; i += 1) {
+      const message = await this.next();
+      const awaiting =
+        message.type === 'tick'
+          ? message.tick.awaitingUnitIds
+          : message.type === 'snapshot'
+            ? message.snapshot.awaitingUnitIds
+            : [];
+      if (awaiting.length > 0) return awaiting;
+    }
+    return [];
   }
 
   close(): void {
@@ -188,15 +223,15 @@ test('剧情事件从上方降临：服务端结算并下发演出记录', async
 
       // 未知事件必须被拒绝
       client.send({ type: 'triggerEvent', eventId: '不存在的事件' });
-      const denied = await client.next();
-      assert.equal(denied.type, 'error');
+      const denied = await client.nextOfType('error');
+      assert.match(denied.message, /事件/, '报错应当说明是哪个事件不认识');
     } finally {
       client.close();
     }
   });
 });
 
-test('开战后服务端下发回合开始记录与待指令列表', async () => {
+test('开战后进入交战，全场行动值从零开始', async () => {
   await withServer(async (url) => {
     const client = await TestClient.connect(url);
     try {
@@ -206,16 +241,23 @@ test('开战后服务端下发回合开始记录与待指令列表', async () =>
       client.send({ type: 'beginBattle' });
       const { snapshot, records } = await client.nextSnapshot();
 
-      assert.equal(snapshot.phase, 'commandInput', '开战后应当等玩家下指令');
-      assert.equal(snapshot.turn, 1, '应当进入第 1 回合');
-      assert.equal(snapshot.awaitingUnitIds.length, 5, '我方 5 人都该等指令');
+      assert.equal(snapshot.phase, 'battle', '开战后进入交战阶段');
+      assert.equal(snapshot.round, 1, '应当进入第 1 轮');
       assert.ok(
-        records.some((record) => record.kind === 'turnStart'),
-        '应当有回合开始的演出记录',
+        records.some((record) => record.kind === 'roundStart'),
+        '应当有轮次开始的演出记录',
       );
       assert.ok(
         records.some((record) => record.kind === 'status'),
         '雪山战场应当因地形成功施加了状态记录',
+      );
+      assert.ok(
+        snapshot.units.every((unit) => unit.gauge === 0),
+        '开局所有人的行动值都该是空的 —— 谁先到点全看速度',
+      );
+      assert.ok(
+        snapshot.units.every((unit) => unit.gaugePerSecond > 0),
+        '每个单位都该带上自己的行动条推进速度，客户端靠它插值',
       );
     } finally {
       client.close();
@@ -223,7 +265,7 @@ test('开战后服务端下发回合开始记录与待指令列表', async () =>
   });
 });
 
-test('提交一整回合指令，服务端算完再回状态与演出剧本', async () => {
+test('服务端推行动条，条满才轮到人 —— 此时才能下达指令', async () => {
   await withServer(async (url) => {
     const client = await TestClient.connect(url);
     try {
@@ -231,34 +273,46 @@ test('提交一整回合指令，服务端算完再回状态与演出剧本', as
       await client.nextSnapshot();
 
       client.send({ type: 'beginBattle' });
-      const started = await client.nextSnapshot();
+      await client.nextSnapshot();
 
-      const enemy = started.snapshot.units.find((unit) => unit.side === 'enemy' && unit.alive);
+      // 等行动条走到有人能动。这一步本身就验证了「服务端在推进」
+      const awaiting = await client.waitForReadyUnit();
+      assert.ok(awaiting.length > 0, '服务端应当把行动条推到有人能动');
+
+      const unitId = awaiting[0];
+      assert.ok(unitId);
+
+      const before = await client.nextSnapshot();
+      const unit = before.snapshot.units.find((u) => u.id === unitId);
+      assert.ok(unit, '等着指令的单位应当在场上');
+      assert.ok(unit.gauge >= 100, '能动就意味着条满了');
+      assert.equal(unit.awaitingCommand, true, '条满的单位应当挂上等待标记');
+
+      const enemy = before.snapshot.units.find((u) => u.side === 'enemy' && u.alive);
       assert.ok(enemy, '应当有活着的敌人');
 
-      const actions = started.snapshot.awaitingUnitIds.map((actorId) => ({
-        actorId,
-        commandId: 'attack' as const,
-        targetId: enemy.id,
-      }));
+      client.send({
+        type: 'act',
+        unitId,
+        action: { actorId: unitId, commandId: 'attack', targetId: enemy.id },
+      });
 
-      client.send({ type: 'submitCommands', actions });
       const advanced = await client.nextSnapshot();
 
       assert.ok(
         advanced.records.some((record) => record.kind === 'strike'),
-        '一回合打完应当产生受击记录',
+        '出手了就该有受击记录',
       );
       assert.ok(
         advanced.records.every((record) => record.kind !== 'strike' || record.hpAfter >= 0),
         '受击记录应当带上结算后的血量',
       );
 
-      const damaged = advanced.snapshot.units.find((unit) => unit.id === enemy.id);
+      const damaged = advanced.snapshot.units.find((u) => u.id === enemy.id);
       assert.ok(damaged, '应当还能找到那个敌人');
       assert.ok(
         damaged.stats.hp < enemy.stats.hp,
-        '被打了 5 次，血量应当下降 —— 而且这个结果只可能来自服务端',
+        '被打的目标应当掉血 —— 而且这个结果只可能来自服务端',
       );
     } finally {
       client.close();
@@ -273,20 +327,21 @@ test('非法意图被拒绝，客户端绕不过服务端', async () => {
       client.send({ type: 'join' });
       await client.nextSnapshot();
 
-      // 布阵阶段就提交指令 —— 阶段不对，必须被拒
-      client.send({ type: 'submitCommands', actions: [] });
-      const denied = await client.next();
-      assert.equal(denied.type, 'error');
-      if (denied.type === 'error') {
-        assert.match(denied.message, /deployment/, '报错应当说明当前阶段');
-      }
+      // 还在布阵就想出手 —— 阶段不对，必须被拒
+      client.send({
+        type: 'act',
+        unitId: 'anyone',
+        action: { actorId: 'anyone', commandId: 'attack' },
+      });
+      const denied = await client.nextOfType('error');
+      assert.match(denied.message, /deployment/, '报错应当说明当前阶段');
 
       // 没入局就操作 —— 也必须被拒
       const fresh = await TestClient.connect(url);
       try {
         fresh.send({ type: 'beginBattle' });
-        const notJoined = await fresh.next();
-        assert.equal(notJoined.type, 'error');
+        const notJoined = await fresh.nextOfType('error');
+        assert.match(notJoined.message, /join/, '应当提醒先 join');
       } finally {
         fresh.close();
       }
@@ -308,7 +363,7 @@ test('重开一局会换一个新的 sessionId', async () => {
 
       assert.notEqual(first.snapshot.sessionId, second.snapshot.sessionId);
       assert.equal(second.snapshot.phase, 'deployment');
-      assert.equal(second.snapshot.turn, 0);
+      assert.equal(second.snapshot.round, 0);
     } finally {
       client.close();
     }

@@ -2,7 +2,7 @@ import { BALANCE } from '../../config/balance.ts';
 import type { BattleUnit, PendingAction } from '../../data/types.ts';
 import type { Rng } from '../../core/rng.ts';
 import { enemiesOf } from './battle-unit.ts';
-import { COMMAND_ORDER, checkUsable, getCommand } from './commands.ts';
+import { checkUsable, getCommand } from './commands.ts';
 
 /**
  * 敌人 AI 与自动战斗决策。
@@ -34,8 +34,13 @@ export function chooseEnemyAction(
 }
 
 /**
- * 演示与测试用：为玩家单位随机挑一条当前可用的指令。
- * 排除「逃跑」—— 否则自动战斗可能永远打不完，测不出胜负。
+ * 自动战斗决策：**像玩家那样打**，而不是乱按。
+ *
+ * 这里原本是「从可用指令里随机挑一条」，结果真测出一个问题：物攻型的阿蛮会反复用
+ * 魔法类的「灵宝」去打高法抗的尸傀，每次只蹭掉 2 点血，战斗永远磨不完。
+ * 自动战斗代表着「一个普通玩家」，所以按属性选招才对。
+ *
+ * 仍然排除「逃跑」—— 否则永远测不出胜负。
  */
 export function chooseAutoAllyAction(
   unit: BattleUnit,
@@ -45,16 +50,19 @@ export function chooseAutoAllyAction(
   const targets = enemiesOf(units, unit);
   if (targets.length === 0) return { actorId: unit.id, commandId: 'defend' };
 
-  const usable = COMMAND_ORDER.filter((id) => {
-    if (id === 'flee') return false;
-    return checkUsable(unit, getCommand(id)).ok;
-  });
+  const target = pickFocus(targets, rng);
 
-  const commandId = rng.pick(usable);
-  const def = getCommand(commandId);
-  if (!def.requiresTarget) return { actorId: unit.id, commandId };
+  // 愤怒够就放特技 —— 伤害最高
+  if (checkUsable(unit, getCommand('skill')).ok) {
+    return { actorId: unit.id, commandId: 'skill', targetId: target.id };
+  }
 
-  return { actorId: unit.id, commandId, targetId: rng.pick(targets).id };
+  // 法系优先法术
+  if (unit.stats.mag > unit.stats.atk && checkUsable(unit, getCommand('spell')).ok) {
+    return { actorId: unit.id, commandId: 'spell', targetId: target.id };
+  }
+
+  return { actorId: unit.id, commandId: 'attack', targetId: target.id };
 }
 
 /** 七成概率集火最虚弱的敌人，偶尔随机 —— 免得 AI 行为过于机械。 */

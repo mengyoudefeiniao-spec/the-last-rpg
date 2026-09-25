@@ -646,3 +646,101 @@ body {
       "start";
   }
 }
+
+/* ============================== 行动条 ============================== */
+
+/* 叠在 3D 战场的右上角 —— 它属于画面，不属于日志区。 */
+.turn-order {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 5;
+  width: 330px;
+  padding: 7px 10px 9px;
+  background: rgba(8, 12, 20, 0.76);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  /* 别挡住 3D 场景的拖拽旋转 */
+  pointer-events: none;
+}
+
+.turn-order[hidden] {
+  display: none;
+}
+
+.turn-order__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+
+.turn-order__note {
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: #6f8098;
+}
+
+.turn-order__track {
+  position: relative;
+  height: 52px;
+  border: 1px solid rgba(120, 140, 175, 0.28);
+  border-radius: 4px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.1));
+}
+
+/* 行动点：轨道最右端那道亮线。图标碰到它就能动手了。 */
+.turn-order__goal {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  right: -1px;
+  width: 3px;
+  border-radius: 2px;
+  background: #ffd479;
+  box-shadow: 0 0 12px rgba(255, 212, 121, 0.85);
+}
+
+.turn-chip {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-left: -11px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  color: #0b1018;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+.turn-chip--ally { background: #4ec9b0; }
+.turn-chip--enemy { background: #e06c75; }
+
+/* 条满了、正等着你下指令的那个 */
+.turn-chip.is-ready {
+  transform: scale(1.2);
+  box-shadow: 0 0 0 2px #ffd479, 0 0 14px rgba(255, 212, 121, 0.9);
+}
+
+.turn-chip.is-down {
+  opacity: 0.3;
+}
+
+/* --------------------- 指令栏：没轮到人时的占位 --------------------- */
+
+.waiting {
+  display: grid;
+  place-items: center;
+  min-height: 48px;
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  font-size: 13px;
+  background: var(--panel);
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+}

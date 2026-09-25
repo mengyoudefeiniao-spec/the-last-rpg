@@ -108,10 +108,21 @@ export interface BattleUnit {
   statuses: ActiveStatus[];
   /** 战场站位。地形效果按它判定（见 systems/battle/terrain.ts）。 */
   position: BattlePosition;
-  /** 本回合是否处于防御姿态，行动结束后解除。 */
+  /**
+   * 行动值 0..100，涨满即可行动。
+   * 推进快慢由速度决定 —— 这就是「行动条」的全部机制（见 Battle.advance）。
+   */
+  actionGauge: number;
+  /** 行动值已满、正等着玩家下指令。只有为 true 时才该显示指令栏。 */
+  awaitingCommand: boolean;
+  /**
+   * 本轮是否已经行动过。
+   * 全员各行动一次算「一轮」，状态持续与 DoT/HoT 以轮为界结算 ——
+   * 行动条没有固定回合，这是最接近直觉的粒度。
+   */
+  actedThisRound: boolean;
+  /** 是否处于防御姿态，自己行动结束后解除。 */
   isDefending: boolean;
-  /** 本回合是否已行动过。 */
-  hasActed: boolean;
   /** 是否已被捕捉（原型：直接移出战斗）。 */
   captured: boolean;
   /** 原型阶段敌人是简单 AI，我方由玩家下达指令。 */
@@ -348,19 +359,16 @@ export interface PendingAction {
 }
 
 /**
- * 战斗状态机的阶段。
- * 顺序：deployment → turnStart → commandInput → statusSettlement → executeCommands
- *      → bothSidesAction → actionEnd → 下一回合。
+ * 战斗阶段。
+ *
+ * 注意：换成行动条之后**没有「回合」了** —— 战斗是一段连续推进，谁的行动值先涨满谁先动。
+ * 所以这里只剩「准备 / 交战 / 结束」三态；谁正等着下指令，要看单位自己的 awaitingCommand。
  */
 export type BattlePhase =
-  /** 布阵：预览阵法、地形与场景，确认后开战。站位由阵法决定，此处不可更改。 */
+  /** 布阵：预览阵法、地形与场景。站位由阵法决定，此处不可更改。 */
   | 'deployment'
-  | 'turnStart'
-  | 'commandInput'
-  | 'statusSettlement'
-  | 'executeCommands'
-  | 'bothSidesAction'
-  | 'actionEnd'
+  /** 交战：行动条持续推进，条满者行动。 */
+  | 'battle'
   | 'victory'
   | 'defeat'
   | 'fled';
@@ -369,7 +377,8 @@ export type BattlePhase =
 export type LogKind = 'system' | 'phase' | 'action' | 'damage' | 'heal' | 'status' | 'resource';
 
 export interface BattleLogEntry {
-  turn: number;
+  /** 发生时的轮次。 */
+  round: number;
   kind: LogKind;
   text: string;
 }

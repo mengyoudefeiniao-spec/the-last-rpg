@@ -14,17 +14,19 @@ import {
   resolveAttack,
   type DamageSpec,
 } from '../src/shared/systems/battle/battle-unit.ts';
-import { applyStatus } from '../src/shared/systems/battle/status-effects.ts';
+import { applyStatus, effectiveStat } from '../src/shared/systems/battle/status-effects.ts';
 import { zoneAt } from '../src/shared/systems/battle/terrain.ts';
 
-const MAX_TURNS = 200;
+/** 推进的步长与上限 —— 上限只是防死循环，正常战斗远用不到。 */
+const STEP_MS = 250;
+const MAX_STEPS = 900;
 
 /** 不带地形的战斗 —— 测的是基本规则，别让地形效果混进来。 */
 function makeBattle(seed: number): Battle {
   return new Battle({ units: createSampleBattleUnits().map(createUnit), seed });
 }
 
-/** 指定战场的一局。默认摆锋矢阵 —— 阵法现在决定我方站位。 */
+/** 指定战场的一局。默认摆锋矢阵 —— 阵法决定我方站位。 */
 function makeBattleOn(
   battlefieldId: string,
   seed: number,
@@ -38,26 +40,144 @@ function makeBattleOn(
   });
 }
 
+/** 推进到有人攒满行动值（或超过步数上限）。 */
+async function advanceUntilReady(battle: Battle, maxSteps = 300): Promise<void> {
+  for (let step = 0; step < maxSteps && battle.awaitingUnits.length === 0; step += 1) {
+    if (battle.finished) return;
+    await battle.advance(100);
+  }
+}
+
 /**
  * 一路自动打到结束。
- * 不挂 director，所以所有演出 await 都被跳过 —— 战斗瞬间跑完，这正是测试要的。
+ *
+ * 行动条下没有「提交一整回合」这回事了 —— 改成不断推进时间，谁攒满了就自动出一手。
+ * 不挂 director，所以所有演出 await 都被跳过，整场战斗在几毫秒内跑完。
  */
 async function runToEnd(battle: Battle): Promise<Battle> {
   battle.start();
   await battle.beginBattle();
 
-  let guard = 0;
+  let step = 0;
   while (!battle.finished) {
-    assert.equal(battle.phase, 'commandInput', '战斗未结束时应当停在指令阶段等待输入');
-    guard += 1;
-    if (guard > MAX_TURNS) throw new Error(`超过 ${MAX_TURNS} 回合仍未分出胜负`);
+    step += 1;
+    if (step > MAX_STEPS) throw new Error(`推进 ${MAX_STEPS} 步仍未分出胜负`);
 
-    await battle.submit(battle.autoCommand());
+    await battle.advance(STEP_MS);
+    await battle.autoAct();
   }
 
-  assert.notEqual(battle.phase, 'commandInput', '结束后不应停留在指令阶段');
+  assert.notEqual(battle.phase, 'battle', '结束后不该还停在交战阶段');
   return battle;
 }
+
+// ---------------------------------------------------------------------------
+// 行动条
+// ---------------------------------------------------------------------------
+
+test('同等时间里，速度快的单位攒的行动值更多', async () => {
+  const battle = makeBattle(1);
+  battle.start();
+  await battle.beginBattle();
+
+  // 只推一小段，避免有人已经到点开始行动而清零
+  await battle.advance(200);
+
+  const bySpeed = [...battle.units].sort(
+    (a, b) => effectiveStat(b, 'spd') - effectiveStat(a, 'spd'),
+  );
+  const fastest = bySpeed[0];
+  const slowest = bySpeed[bySpeed.length - 1];
+  assert.ok(fastest && slowest);
+
+  assert.ok(
+    fastest.actionGauge > slowest.actionGauge,
+    `速度快的应当攒得更快：${fastest.name} ${fastest.actionGauge.toFixed(1)} vs ${slowest.name} ${slowest.actionGauge.toFixed(1)}`,
+  );
+});
+
+test('只有行动值满了才能下达指令', async () => {
+  const battle = makeBattle(2);
+  battle.start();
+  await battle.beginBattle();
+
+  const actor = battle.units.find((unit) => unit.side === 'ally');
+  assert.ok(actor);
+  assert.equal(actor.actionGauge, 0, '开局行动值是空的');
+  assert.equal(actor.awaitingCommand, false);
+
+  await assert.rejects(
+    () => battle.submitAction(actor.id, { actorId: actor.id, commandId: 'attack' }),
+    /行动条还没满/,
+    '条没满时不该受理指令',
+  );
+});
+
+test('攒满之后进入待指令，行动完条归零', async () => {
+  const battle = makeBattle(3);
+  battle.start();
+  await battle.beginBattle();
+
+  await advanceUntilReady(battle);
+
+  const actor = battle.awaitingUnits[0];
+  assert.ok(actor, '推进够久之后应当有人能动');
+  assert.ok(actor.awaitingCommand, '到点的单位应当挂着等待指令');
+  assert.ok(actor.actionGauge >= 100, '到点的单位行动值应当是满的');
+
+  await battle.submitAction(actor.id, { actorId: actor.id, commandId: 'defend' });
+
+  assert.equal(actor.awaitingCommand, false, '行动完就该清掉等待标记');
+  assert.equal(actor.actionGauge, 0, '行动完行动值归零');
+});
+
+test('你还在犹豫时行动条不会停 —— 敌人照样能抢先动手', async () => {
+  const battle = makeBattle(5);
+  battle.start();
+  await battle.beginBattle();
+
+  await advanceUntilReady(battle);
+  assert.ok(battle.awaitingUnits.length > 0, '应当有人正等着指令');
+
+  // 关键：挂起不操作，继续推进时间
+  const logBefore = battle.log.length;
+  await battle.advance(8000);
+
+  assert.ok(
+    battle.log.length > logBefore,
+    '玩家不下指令时，敌方的条照样该走满并动手 —— 这就是实时行动条',
+  );
+  assert.ok(
+    battle.awaitingUnits.length > 0,
+    '等着指令的单位应当一直挂着，不会被时间吞掉',
+  );
+});
+
+test('同时到点的多个单位都能各自行动', async () => {
+  const battle = makeBattle(4);
+  battle.start();
+  await battle.beginBattle();
+
+  await advanceUntilReady(battle);
+
+  const ready = battle.awaitingUnits;
+  assert.ok(ready.length >= 1, '推这么久了，至少该有人能动');
+
+  // 逐个下指令，直到没人等着为止
+  const handled: string[] = [];
+  while (battle.awaitingUnits.length > 0 && handled.length < 10) {
+    const actor = battle.awaitingUnits[0];
+    assert.ok(actor);
+    handled.push(actor.id);
+    await battle.submitAction(actor.id, { actorId: actor.id, commandId: 'defend' });
+  }
+
+  assert.equal(new Set(handled).size, handled.length, '同一个单位不该被处理两次');
+});
+
+// ---------------------------------------------------------------------------
+// 基本规则
+// ---------------------------------------------------------------------------
 
 test('同一套数据能打完一场完整战斗，且我方整体占优', async () => {
   const outcomes = new Map<string, number>();
@@ -67,7 +187,6 @@ test('同一套数据能打完一场完整战斗，且我方整体占优', async
     const outcome = battle.result?.outcome ?? 'none';
     outcomes.set(outcome, (outcomes.get(outcome) ?? 0) + 1);
 
-    assert.ok((battle.result?.turns ?? 0) >= 2, `seed=${seed} 的回合数不合理`);
     assert.ok(battle.log.length > 10, `seed=${seed} 的日志过少，可能没真的打起来`);
   }
 
@@ -78,25 +197,27 @@ test('同一套数据能打完一场完整战斗，且我方整体占优', async
   );
 });
 
-test('一个回合内的阶段顺序与设计一致', async () => {
+test('开战进入交战阶段，结束时进入终局阶段', async () => {
   const battle = makeBattle(7);
+  battle.start();
+  assert.equal(battle.phase, 'deployment', '开局停在布阵阶段');
+
   const phases: BattlePhase[] = [];
   battle.events.on('phase', (phase) => phases.push(phase));
 
-  battle.start();
   await battle.beginBattle();
-  phases.length = 0; // 只关心一个完整回合的循环
+  assert.equal(battle.phase, 'battle', '开战后进入交战');
 
-  await battle.submit(battle.autoCommand());
+  for (let step = 0; step < MAX_STEPS && !battle.finished; step += 1) {
+    await battle.advance(STEP_MS);
+    await battle.autoAct();
+  }
 
-  assert.deepEqual(phases, [
-    'statusSettlement',
-    'executeCommands',
-    'bothSidesAction',
-    'actionEnd',
-    'turnStart',
-    'commandInput',
-  ]);
+  assert.ok(battle.finished, '应当能分出胜负');
+  assert.ok(
+    phases.some((phase) => phase === 'victory' || phase === 'defeat' || phase === 'fled'),
+    `终局阶段应当被广播出来：${phases.join(' → ')}`,
+  );
 });
 
 test('HP / MP / SP 全程不越界', async () => {
@@ -108,11 +229,15 @@ test('HP / MP / SP 全程不越界', async () => {
       assert.ok(hp >= 0 && hp <= maxHp, `${unit.name} 的 HP 越界：${hp}/${maxHp}`);
       assert.ok(mp >= 0 && mp <= maxMp, `${unit.name} 的 MP 越界：${mp}/${maxMp}`);
       assert.ok(sp >= 0 && sp <= maxSp, `${unit.name} 的 SP 越界：${sp}/${maxSp}`);
+      assert.ok(
+        unit.actionGauge >= 0 && unit.actionGauge <= 100,
+        `${unit.name} 的行动值越界：${unit.actionGauge}`,
+      );
     }
   }
 });
 
-test('状态效果到期后会在行动结束判定阶段被移除', async () => {
+test('状态效果到期后会被移除', async () => {
   const battle = makeBattle(3);
   battle.start();
   await battle.beginBattle();
@@ -123,11 +248,15 @@ test('状态效果到期后会在行动结束判定阶段被移除', async () =>
   applyStatus(boss, getStatusDef('poison'), 'test', 1);
   assert.equal(boss.statuses.length, 1);
 
-  await battle.submit(battle.autoCommand());
+  for (let step = 0; step < MAX_STEPS && boss.statuses.length > 0; step += 1) {
+    if (battle.finished) break;
+    await battle.advance(STEP_MS);
+    await battle.autoAct();
+  }
 
   assert.ok(
     !boss.statuses.some((status) => status.def.id === 'poison'),
-    '只持续 1 回合的中毒应当已经被移除',
+    '只持续 1 轮的中毒应当已经被移除',
   );
 });
 
@@ -199,10 +328,11 @@ test('逃跑成功会立即结束战斗', async () => {
     battle.start();
     await battle.beginBattle();
 
+    await advanceUntilReady(battle);
     const actor = battle.awaitingUnits[0];
-    assert.ok(actor, '首个回合应当有可操作的我方单位');
+    assert.ok(actor, '推进后应当有可操作的我方单位');
 
-    await battle.submit([{ actorId: actor.id, commandId: 'flee' }]);
+    await battle.submitAction(actor.id, { actorId: actor.id, commandId: 'flee' });
     if (battle.result?.outcome === 'fled') fled = true;
   }
 
@@ -214,8 +344,8 @@ test('挂了 director 时，演出点会被依次回调', async () => {
   const calls: string[] = [];
 
   battle.director = {
-    onTurnStart: () => {
-      calls.push('turnStart');
+    onRoundStart: () => {
+      calls.push('roundStart');
     },
     beforeAction: (actor) => {
       calls.push(`before:${actor.id}`);
@@ -231,9 +361,13 @@ test('挂了 director 时，演出点会被依次回调', async () => {
   battle.start();
   await battle.beginBattle();
   calls.length = 0;
-  await battle.submit(battle.autoCommand());
 
-  assert.ok(calls.includes('turnStart'), '回合开始应当回调 onTurnStart');
+  for (let step = 0; step < MAX_STEPS && !calls.some((c) => c.startsWith('after:')); step += 1) {
+    if (battle.finished) break;
+    await battle.advance(STEP_MS);
+    await battle.autoAct();
+  }
+
   assert.ok(calls.some((call) => call.startsWith('before:')), '至少应当有一次行动前摇');
   assert.ok(calls.includes('strike'), '行动期间应当有伤害回调');
 
@@ -351,7 +485,7 @@ test('地形状态只给站在区域内的单位', async () => {
   assert.ok(covered > 0, '雪山战场上应当至少有一个单位站在冻伤区里');
 });
 
-test('走出地形区域后，地形状态会在下一回合被清除', async () => {
+test('走出地形区域后，地形状态会在下一轮被清除', async () => {
   const battle = makeBattleOn('snow-ridge', 5);
   battle.start();
   await battle.beginBattle();
@@ -368,7 +502,13 @@ test('走出地形区域后，地形状态会在下一回合被清除', async ()
   // 直接改坐标来模拟「因故离开区域」：正式玩法里只有布阵能换位，
   // 这里测的是同步逻辑本身 —— 它不该依赖换位这条路径。
   target.position = { x: 0, z: 0 };
-  await battle.submit(battle.autoCommand());
+
+  for (let step = 0; step < MAX_STEPS; step += 1) {
+    if (battle.finished) break;
+    if (!target.statuses.some((status) => status.def.id === 'frostbite')) break;
+    await battle.advance(STEP_MS);
+    await battle.autoAct();
+  }
 
   assert.ok(
     !target.statuses.some((status) => status.def.id === 'frostbite'),
@@ -380,6 +520,5 @@ test('三个战场都能打完一整场', async () => {
   for (const id of ['snow-ridge', 'flame-rift', 'immortal-spring']) {
     const battle = await runToEnd(makeBattleOn(id, 9));
     assert.ok(battle.result, `战场 ${id} 没能分出胜负`);
-    assert.ok((battle.result?.turns ?? 0) >= 2, `战场 ${id} 的回合数不合理`);
   }
 });

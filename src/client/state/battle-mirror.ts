@@ -1,3 +1,4 @@
+import { BALANCE } from '../../shared/config/balance.ts';
 import type {
   Battlefield,
   BattleLogEntry,
@@ -22,7 +23,8 @@ import type {
 export class BattleMirror {
   sessionId = '';
   phase: BattlePhase = 'deployment';
-  turn = 0;
+  /** 轮次：全员各行动一次算一轮。 */
+  round = 0;
   battlefield: Battlefield | null = null;
   /** 我方阵法 —— 阵位与阵图连线都从这里读。 */
   formation: Formation | null = null;
@@ -33,7 +35,7 @@ export class BattleMirror {
   log: BattleLogEntry[] = [];
   result: BattleResult | null = null;
 
-  /** 演出进行中为 true —— UI 据此锁住输入，避免演到一半又提交一轮。 */
+  /** 演出进行中为 true —— UI 据此锁住输入，行动条也停着。 */
   playing = false;
 
   /**
@@ -43,10 +45,19 @@ export class BattleMirror {
    */
   private readonly hpOverride = new Map<string, number>();
 
+  /**
+   * 行动值的插值基点。
+   *
+   * 服务端每 100ms 才报一次，照它直接画的话条会一跳一跳；
+   * 所以记下「上次收到的值 + 收到的时刻」，渲染时按 gaugePerSecond 往前推。
+   * 这只是表现层的补间 —— 谁该行动永远由服务端说了算。
+   */
+  private readonly gaugeBase = new Map<string, { value: number; at: number }>();
+
   applySnapshot(snapshot: BattleSnapshot): void {
     this.sessionId = snapshot.sessionId;
     this.phase = snapshot.phase;
-    this.turn = snapshot.turn;
+    this.round = snapshot.round;
     this.battlefield = snapshot.battlefield;
     this.formation = snapshot.formation;
     this.scenery = snapshot.scenery;
@@ -55,6 +66,36 @@ export class BattleMirror {
     this.log = snapshot.log;
     this.result = snapshot.result;
     this.hpOverride.clear();
+
+    for (const unit of snapshot.units) this.markGauge(unit.id, unit.gauge);
+  }
+
+  /** 应用一次行动条心跳。 */
+  applyTick(gauges: ReadonlyArray<{ unitId: string; gauge: number }>, awaitingUnitIds: string[]): void {
+    for (const entry of gauges) this.markGauge(entry.unitId, entry.gauge);
+    this.awaitingUnitIds = awaitingUnitIds;
+
+    // 心跳里带到了「谁可以操作」，把单位快照也顺手对齐
+    for (const unit of this.units) {
+      unit.awaitingCommand = awaitingUnitIds.includes(unit.id);
+    }
+  }
+
+  private markGauge(unitId: string, value: number): void {
+    this.gaugeBase.set(unitId, { value, at: performance.now() });
+  }
+
+  /**
+   * 显示用的行动值：两次心跳之间按速度插值补平，条才走得顺。
+   * 演出期间不推进 —— 服务端那时也停着。
+   */
+  displayGauge(unit: UnitSnapshot): number {
+    const base = this.gaugeBase.get(unit.id);
+    if (!base) return unit.gauge;
+    if (this.playing || unit.awaitingCommand) return base.value;
+
+    const elapsed = (performance.now() - base.at) / 1000;
+    return Math.min(BALANCE.gaugeMax, base.value + unit.gaugePerSecond * elapsed);
   }
 
   /** 播放一条演出记录时的即时反应。 */
@@ -85,9 +126,12 @@ export class BattleMirror {
     return this.result !== null;
   }
 
-  /** 当前等待指令的我方单位（按服务端给的顺序）。 */
+  /**
+   * 当前等待指令的我方单位。
+   * 这份名单完全由服务端决定 —— 行动条没满的单位根本不在这里。
+   */
   get awaitingUnits(): UnitSnapshot[] {
-    if (this.phase !== 'commandInput' || this.finished) return [];
+    if (this.finished) return [];
     return this.awaitingUnitIds
       .map((id) => this.unitById(id))
       .filter((unit): unit is UnitSnapshot => unit !== undefined);

@@ -12,9 +12,10 @@ if (!app) throw new Error('找不到 #app 容器');
 /**
  * 客户端装配。
  *
- * 注意这里的依赖方向：mirror 从服务端推来的快照填充，stage 与 view 只读 mirror；
+ * 依赖方向：mirror 从服务端推来的快照与心跳填充，stage 与 view 只读 mirror；
  * 玩家意图则原样转发给服务端，中途不做任何本地状态修改。
- * 客户端唯一的「记忆」就是那份快照 —— 连阵法与场景也不例外，它们都存在服务端。
+ *
+ * 有两类下行消息要分开对待：`tick` 只更新行动条（高频），`snapshot` 才是完整状态。
  */
 const mirror = new BattleMirror();
 
@@ -34,7 +35,8 @@ function resetStage(): void {
 
 view = new BattleView(app, mirror, {
   onBeginBattle: () => client.send({ type: 'beginBattle' }),
-  onSubmit: (actions) => client.send({ type: 'submitCommands', actions }),
+  /** 为某个条已满的单位下达指令 —— 只有它能动。 */
+  onAct: (unitId, action) => client.send({ type: 'act', unitId, action }),
   onTriggerEvent: (eventId) => client.send({ type: 'triggerEvent', eventId }),
   onRestart: () => {
     resetStage();
@@ -63,6 +65,13 @@ async function handleMessage(message: ServerMessage): Promise<void> {
     return;
   }
 
+  // 行动条心跳：只更新条的位置与「谁能操作」，不碰别的
+  if (message.type === 'tick') {
+    mirror.applyTick(message.tick.gauges, message.tick.awaitingUnitIds);
+    view.refreshGauges();
+    return;
+  }
+
   const { snapshot, records } = message;
 
   // 首次同步（或换局之后）：这时才拿到战场、阵法与场景，才能把 3D 舞台建起来
@@ -80,6 +89,9 @@ async function handleMessage(message: ServerMessage): Promise<void> {
   await stage.playRecords(records);
   mirror.applySnapshot(snapshot);
   view.refresh();
+
+  // 播完了要告诉服务端 —— 在那之前行动条是停着的
+  if (records.length > 0) client.send({ type: 'playbackDone' });
 }
 
 client.connect();

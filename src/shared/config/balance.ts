@@ -20,10 +20,10 @@ export const BALANCE = {
   resFactor: 0.6,
   /** 受击获得的 SP = 实际伤害 × 该系数。 */
   spGainPerDamageTaken: 0.6,
-  /** 每回合自然回复的 SP。 */
-  spRegenPerTurn: 6,
-  /** 每回合自然回复的 MP。 */
-  mpRegenPerTurn: 3,
+  /** 每一轮自然回复的 SP。注意行动条下没有「回合」，以「全员各行动一次」为一轮。 */
+  spRegenPerRound: 6,
+  /** 每一轮自然回复的 MP。 */
+  mpRegenPerRound: 3,
   /** 逃跑基础成功率。 */
   fleeBaseChance: 0.45,
   /** 逃跑判定中，速度每领先 1 点带来的概率加成。 */
@@ -36,4 +36,19 @@ export const BALANCE = {
   captureHpWeight: 0.6,
   /** 敌人 AI 选择特技的血量阈值。 */
   aiSkillHpThreshold: 0.5,
+
+  // ------------------------------- 行动条 -------------------------------
+
+  /** 行动值上限 —— 涨满即可行动。 */
+  gaugeMax: 100,
+  /**
+   * 行动值推进系数：每点速度每秒推进多少行动值。
+   * 速度 38 的单位约 3.3 秒涨满，速度 18 的约 7 秒 —— 快慢一眼就看得出来。
+   */
+  gaugeRate: 0.8,
+  /**
+   * 推进的时间步长（秒）。
+   * advance() 会把一大段 dt 切成这么大的小步，免得一步就跨过「谁先到行动点」的细节。
+   */
+  gaugeStep: 0.05,
 } as const;

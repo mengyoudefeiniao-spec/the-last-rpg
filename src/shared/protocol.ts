@@ -16,8 +16,12 @@ import type {
 /**
  * 前后端协议。
  *
- * 原则：服务端是唯一权威。客户端只能发「意图」（换阵、开战、下指令、触发事件），
+ * 原则：服务端是唯一权威。客户端只能发「意图」（换阵、开战、下达指令、触发事件），
  * 所有战斗状态一律由服务端下发，客户端不许自己算任何战斗结果。
+ *
+ * 注意有两类下行消息，别混用：
+ * · `snapshot` —— 完整状态，状态真的变了才发
+ * · `tick`     —— 只有行动值，高频发，为的是让行动条看起来在走
  */
 
 export const PROTOCOL_VERSION = 1;
@@ -58,6 +62,12 @@ export interface UnitSnapshot {
   isPlayerControlled: boolean;
   /** 所站阵位的角色名（如「锋头」），只有我方有。 */
   formationRole?: string;
+  /** 行动值 0..100 —— 客户端把图标画在行动条的这个位置上。 */
+  gauge: number;
+  /** 该单位每秒推进多少行动值。客户端据此在两次上报之间插值，条才走得平滑。 */
+  gaugePerSecond: number;
+  /** 行动值已满、正等着玩家下指令。只有为 true 时才该显示指令栏。 */
+  awaitingCommand: boolean;
   /**
    * 指令可用性，只对我方单位下发。
    * 「这个特技现在能不能放」是规则判断，客户端不该自己推一份 —— 那是双份真源的开始。
@@ -79,17 +89,30 @@ export interface Scenery {
 export interface BattleSnapshot {
   sessionId: string;
   phase: BattlePhase;
-  turn: number;
+  /** 轮次。全员各行动一次算一轮 —— 行动条下没有固定回合。 */
+  round: number;
   battlefield: Battlefield;
   /** 我方当前阵法。站位、阵图连线都在里面。 */
   formation: Formation;
   /** 场景外观（只影响观感）。 */
   scenery: Scenery;
   units: UnitSnapshot[];
-  /** 正在等待指令的我方单位 id（按下达顺序）。 */
+  /** 行动值已满、正等着指令的我方单位 —— 完整状态里也带一份，方便重连时对齐。 */
   awaitingUnitIds: string[];
   log: BattleLogEntry[];
   result: BattleResult | null;
+}
+
+/**
+ * 行动值推送 —— 一次轻量的心跳。
+ *
+ * 行动条要看起来「在走」就得高频上报，但完整快照太大了，
+ * 所以单独走这条消息，只带条的位置与「谁现在能操作」。
+ */
+export interface BattleTick {
+  sessionId: string;
+  gauges: Array<{ unitId: string; gauge: number }>;
+  awaitingUnitIds: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +127,7 @@ export interface BattleSnapshot {
  * 但记录本身不承担状态权威 —— 播完一律用随行的 snapshot 校正。
  */
 export type BattleRecord =
-  | { kind: 'turnStart'; turn: number }
+  | { kind: 'roundStart'; round: number }
   | { kind: 'beforeAction'; actorId: string; commandId: CommandId; targetId: string | null }
   | {
       kind: 'strike';
@@ -149,10 +172,12 @@ export type ClientMessage =
   | { type: 'savePartyConfig'; formationId?: string; battlefieldId?: string; environmentId?: string; weatherId?: string }
   /** 布阵完成，开打。 */
   | { type: 'beginBattle' }
-  /** 提交一整回合的指令。 */
-  | { type: 'submitCommands'; actions: PendingAction[] }
+  /** 为某个**行动值已满**的单位下达指令。别的单位此刻不能动。 */
+  | { type: 'act'; unitId: string; action: PendingAction }
   /** 手动触发一个剧情事件（目前只有天雷，用于验证事件链路）。 */
   | { type: 'triggerEvent'; eventId: string }
+  /** 演出播完了 —— 服务端收到这条才恢复行动条推进。 */
+  | { type: 'playbackDone' }
   /** 重开一局（沿用当前配置）。 */
   | { type: 'restart'; seed?: number };
 
@@ -166,15 +191,14 @@ export type ServerMessage =
    * 连接建立时 records 为空，只带初始快照。
    */
   | { type: 'snapshot'; snapshot: BattleSnapshot; records: BattleRecord[] }
+  /** 行动条心跳：只有条的位置，没有别的。 */
+  | { type: 'tick'; tick: BattleTick }
   | { type: 'error'; message: string };
 
 /** 供服务端与客户端共用的快速判断。 */
 export function isServerMessage(value: unknown): value is ServerMessage {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'type' in value &&
-    ((value as { type: unknown }).type === 'snapshot' ||
-      (value as { type: unknown }).type === 'error')
-  );
+  if (typeof value !== 'object' || value === null || !('type' in value)) return false;
+
+  const type = (value as { type: unknown }).type;
+  return type === 'snapshot' || type === 'tick' || type === 'error';
 }

@@ -15,7 +15,6 @@ import type {
   PendingAction,
   Side,
   StageEventDef,
-  StatKey,
   StatusDef,
   StatusTrigger,
 } from '../../data/types.ts';
@@ -33,7 +32,7 @@ import {
   spendSp,
   type DamageSpec,
 } from './battle-unit.ts';
-import { checkUsable, getCommand } from './commands.ts';
+import { getCommand } from './commands.ts';
 import {
   applyStatus,
   blockingStatus,
@@ -71,8 +70,8 @@ export interface StatusReport {
  * 接口本身只涉及领域类型，不含任何 DOM 概念，所以逻辑层依然与渲染彻底解耦。
  */
 export interface BattleDirector {
-  /** 回合开始，可播回合横幅。 */
-  onTurnStart?(turn: number): Promise<void> | void;
+  /** 新的一轮开始（全员各行动一次算一轮）。 */
+  onRoundStart?(round: number): Promise<void> | void;
   /** 某个单位即将行动：可让角色移动到位、播前摇。 */
   beforeAction?(
     actor: BattleUnit,
@@ -109,9 +108,6 @@ export interface BattleOptions {
   seed?: number;
 }
 
-/** 属性键的展示顺序，日志里按这个顺序列增益减益。 */
-const STAT_KEYS: readonly StatKey[] = ['atk', 'def', 'mag', 'res', 'spd'];
-
 /** 没有任何地形效果的空白战场。 */
 function emptyBattlefield(): Battlefield {
   return {
@@ -142,21 +138,20 @@ function emptyFormation(): Formation {
 }
 
 /**
- * 回合制战斗状态机。
+ * 行动条驱动的战斗（实时 ATB）。
  *
- * 完整流程：
+ * 没有「回合」——战斗是一段连续推进：
  *
- *   0. deployment       布阵：预览阵法、地形与场景（站位由阵法定，此处不可更改）
- *   1. turnStart        回合开始：同步地形状态、自然回复、回合开始触发的状态结算
- *   2. commandInput     玩家选择指令（此处暂停，等待调用方 submit）
- *   3. statusSettlement 状态结算：判定能否行动、汇总属性修正
- *   4. executeCommands  执行玩家指令：校验并固化；防御/逃跑立即生效
- *   5. bothSidesAction  敌我双方行动：按速度排序依次结算
- *   6. actionEnd        行动结束判定：DoT/HoT、状态倒计时与到期
- *   → 回到 1，直到一方全灭
+ *   1. 每个单位的行动值按 速度 × gaugeRate 每秒往上走（见 advance）
+ *   2. 涨满 100 的单位才能行动：
+ *      · 我方 → 挂上 awaitingCommand，**等玩家下指令**（但条不会停，别人照样在攒）
+ *      · 敌方 → 立即由 AI 行动
+ *   3. 行动完条归零，从头再攒
  *
- * 类本身对 DOM 一无所知，只通过事件总线广播，并在挂了 director 时暂停等待演出。
- * 地形效果只在 syncTerrainStatuses 一处判定，别处不许再写第二份判断。
+ * 「时间」由外部注入：服务端按节拍调 advance(dt)，测试直接喂一大段 —— 所以逻辑里
+ * 没有任何定时器，也不需要真实时钟，整场战斗可以在几毫秒内跑完。
+ *
+ * 全员各行动一次算「一轮」，状态的持续回合与 DoT/HoT 以轮为界结算。
  */
 export class Battle {
   readonly units: BattleUnit[];
@@ -173,15 +168,14 @@ export class Battle {
   director: BattleDirector | undefined;
 
   phase: BattlePhase = 'deployment';
-  turn = 0;
+  /** 轮次。全员各行动一次算一轮（不是固定时间）。 */
+  round = 0;
   result: BattleResult | null = null;
 
   private readonly rng: Rng;
-  private pending: readonly PendingAction[] = [];
-  private queued: PendingAction[] = [];
-  /** 本回合被状态（眩晕等）禁止行动的单位 id。 */
-  private blocked = new Set<string>();
   private fled = false;
+  /** 防重入：advance 与 submitAction 都是异步的，不能交错执行。 */
+  private busy = false;
 
   constructor(options: BattleOptions) {
     this.units = options.units;
@@ -228,15 +222,15 @@ export class Battle {
     return this.result !== null;
   }
 
-  /** 当前等待玩家下达指令的单位；不在指令阶段则为空数组。 */
+  /** 行动值已满、正等着玩家下指令的我方单位。只有这些才该显示指令栏。 */
   get awaitingUnits(): BattleUnit[] {
-    if (this.phase !== 'commandInput' || this.finished) return [];
-    return this.survivorsOf('ally').filter((unit) => unit.isPlayerControlled);
+    if (this.finished) return [];
+    return this.survivorsOf('ally').filter((unit) => unit.awaitingCommand);
   }
 
   /** 进入布阵阶段：预览阵法与地形，确认后开战。站位由阵法定死，此处不能改。 */
   start(): void {
-    if (this.turn !== 0) throw new Error('战斗已经开始，请新建实例');
+    if (this.round !== 0) throw new Error('战斗已经开始，请新建实例');
     this.enterPhase('deployment');
 
     this.logIt('system', `来到「${this.battlefield.name}」—— ${this.battlefield.desc}`);
@@ -253,29 +247,187 @@ export class Battle {
     this.events.emit('update', undefined);
   }
 
-  /** 布阵完成，开打。 */
+  /** 布阵完成，开打。此后战斗由 advance() 推进。 */
   async beginBattle(): Promise<void> {
     if (this.phase !== 'deployment') throw new Error('当前不在布阵阶段');
     this.logIt('system', '阵势已定，战斗开始！');
-    await this.beginTurn();
+    this.enterPhase('battle');
+
+    await this.beginRound();
     this.events.emit('update', undefined);
   }
 
-  /** 把某个我方单位的落点与阵位写进日志 —— 玩家据此看清这个阵法的代价。 */
-  private reportPosition(unit: BattleUnit): void {
-    const { zone } = desiredTerrainEffects(this.battlefield, unit.position);
-    const slot = this.formationSlotOf(unit.id);
-    const who = slot ? `${unit.name}（${slot.role}）` : unit.name;
+  // ==========================================================================
+  // 行动条
+  // ==========================================================================
 
-    this.logIt(
-      'status',
-      zone ? `${who} 立于「${zone.name}」 —— ${zone.desc}` : `${who} 处于普通地面`,
-    );
+  /**
+   * 推进行动条。
+   *
+   * **时间由外部注入**：服务端按节拍调用，测试直接喂一大段 deltaMs。
+   * 一大段会被切成 gaugeStep 的小步，免得一步就跨过「谁先到行动点」的细节。
+   *
+   * 正在等待玩家指令的单位不再推进 —— 它已经到终点了。
+   */
+  async advance(deltaMs: number): Promise<void> {
+    if (this.phase !== 'battle' || this.finished || this.busy) return;
+
+    this.busy = true;
+    try {
+      let remaining = deltaMs / 1000;
+
+      while (remaining > 0 && this.phase === 'battle' && !this.finished) {
+        const step = Math.min(remaining, BALANCE.gaugeStep);
+        remaining -= step;
+
+        for (const unit of this.units) {
+          if (!isAlive(unit) || unit.awaitingCommand) continue;
+
+          unit.actionGauge = Math.min(
+            BALANCE.gaugeMax,
+            unit.actionGauge + effectiveStat(unit, 'spd') * BALANCE.gaugeRate * step,
+          );
+        }
+
+        await this.processReadyUnits();
+      }
+
+      this.events.emit('update', undefined);
+    } finally {
+      this.busy = false;
+    }
   }
 
-  // -------------------------------------------------------------------------
+  /**
+   * 处理所有条已满的单位。
+   *
+   * 我方条满 → 挂上 awaitingCommand 就**不再阻塞推进**：你犹豫的时候，别人的条照样在涨，
+   * 敌人可能先到点先动手。这正是仙剑 3 那种紧张感的来源，也是这个玩法的核心。
+   * 敌方条满 → 立刻由 AI 行动。
+   */
+  private async processReadyUnits(): Promise<void> {
+    for (const unit of this.units) {
+      if (this.finished) return;
+      if (!isAlive(unit)) continue;
+      if (unit.actionGauge < BALANCE.gaugeMax) continue;
+
+      if (unit.isPlayerControlled) {
+        if (unit.awaitingCommand) continue;
+
+        unit.awaitingCommand = true;
+        this.logIt('phase', `${unit.name} 的行动条已满 —— 等待你的指令`);
+        continue;
+      }
+
+      await this.takeTurn(unit, chooseEnemyAction(unit, this.units, this.rng));
+      if (this.finishIfOver()) return;
+    }
+  }
+
+  /** 玩家为某个条已满的单位下达指令。 */
+  async submitAction(unitId: string, action: PendingAction): Promise<void> {
+    if (this.phase !== 'battle') throw new Error(`当前阶段是 ${this.phase}，不接受指令`);
+    if (this.busy) throw new Error('战斗正在处理中，请稍候');
+
+    const unit = this.units.find((candidate) => candidate.id === unitId);
+    if (!unit) throw new Error('找不到这个单位');
+    if (!isAlive(unit)) throw new Error(`${unit.name} 已经不行动了`);
+    if (!unit.awaitingCommand) throw new Error(`${unit.name} 的行动条还没满`);
+
+    this.busy = true;
+    try {
+      await this.takeTurn(unit, action);
+      if (this.finishIfOver()) return;
+
+      // 刚才那一小段时间里，别的单位可能也到点了
+      await this.processReadyUnits();
+      this.events.emit('update', undefined);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** 一个单位的一次完整行动：清条 → 前摇 → 结算 → 收尾。 */
+  private async takeTurn(actor: BattleUnit, action: PendingAction): Promise<void> {
+    actor.awaitingCommand = false;
+    actor.actionGauge = 0;
+    actor.actedThisRound = true;
+
+    // 被眩晕之类控住：这次行动作废，但条照样清空 —— 控制技能的价值就在这里
+    const blocker = blockingStatus(actor);
+    if (blocker) {
+      this.logIt('status', `${actor.name} 因「${blocker.def.name}」无法行动`);
+      await this.endTurn(actor);
+      return;
+    }
+
+    await this.executeAction(actor, action);
+    await this.endTurn(actor);
+  }
+
+  /** 一次行动的收尾：DoT/HoT、状态倒计时、解除防御、归位，然后看看要不要开新一轮。 */
+  private async endTurn(actor: BattleUnit): Promise<void> {
+    await this.applyStatusTicks(actor, 'actionEnd');
+    if (this.finishIfOver()) return;
+
+    for (const status of decrementDurations(actor)) {
+      this.logIt('status', `${actor.name} 的「${status.def.name}」结束了`);
+    }
+
+    // 防御姿态只护到「自己下次行动之前」
+    actor.isDefending = false;
+    await this.director?.afterAction?.(actor);
+
+    if (this.finished) return;
+
+    const alive = this.units.filter((unit) => isAlive(unit));
+    if (alive.length > 0 && alive.every((unit) => unit.actedThisRound)) {
+      await this.beginRound();
+    }
+  }
+
+  /**
+   * 开一轮。
+   *
+   * 行动条没有固定回合，但状态的持续与 DoT/HoT 总得有个结算粒度 ——
+   * 这里取「全员各行动一次」为一轮，也就是最接近直觉的那个。
+   */
+  private async beginRound(): Promise<void> {
+    this.round += 1;
+    this.logIt('phase', `—— 第 ${this.round} 轮 ——`);
+
+    for (const unit of this.units) {
+      if (isAlive(unit)) unit.actedThisRound = false;
+    }
+
+    await this.director?.onRoundStart?.(this.round);
+
+    // 必须早于其他轮开始效果：否则这轮刚站进冻伤区，要等下一轮才生效
+    await this.syncTerrainStatuses();
+
+    for (const unit of this.units) {
+      if (!isAlive(unit)) continue;
+
+      const mp = gainMp(unit, BALANCE.mpRegenPerRound);
+      const sp = gainSp(unit, BALANCE.spRegenPerRound);
+      this.logIt('resource', `${unit.name} 自然回复 ${mp} MP、${sp} 愤怒`);
+
+      await this.applyStatusTicks(unit, 'turnStart');
+    }
+  }
+
+  /** 演示与测试用：让所有条已满的我方单位各自动出一手。 */
+  async autoAct(): Promise<void> {
+    while (!this.finished && this.awaitingUnits.length > 0) {
+      const unit = this.awaitingUnits[0];
+      if (!unit) break;
+      await this.submitAction(unit.id, chooseAutoAllyAction(unit, this.units, this.rng));
+    }
+  }
+
+  // ==========================================================================
   // 剧情事件
-  // -------------------------------------------------------------------------
+  // ==========================================================================
 
   /**
    * 剧情事件降临。
@@ -330,238 +482,9 @@ export class Battle {
     this.events.emit('update', undefined);
   }
 
-  /**
-   * 提交一整个回合的指令，并推进到下一个指令阶段（或战斗结束）。
-   * 挂了 director 时会在每个动作点暂停，等演出播完。
-   */
-  async submit(actions: readonly PendingAction[]): Promise<void> {
-    if (this.phase !== 'commandInput') {
-      throw new Error(`当前阶段是 ${this.phase}，不接受指令`);
-    }
-    this.pending = [...actions];
-
-    this.enterPhase('statusSettlement');
-    this.runStatusSettlement();
-    if (this.finishIfOver()) return;
-
-    this.enterPhase('executeCommands');
-    await this.runExecuteCommands();
-    if (this.finishIfOver()) return;
-
-    this.enterPhase('bothSidesAction');
-    await this.runBothSidesAction();
-    if (this.finishIfOver()) return;
-
-    this.enterPhase('actionEnd');
-    await this.runActionEnd();
-    if (this.finishIfOver()) return;
-
-    await this.beginTurn();
-    this.events.emit('update', undefined);
-  }
-
-  /** 演示与测试用：为所有等待指令的我方单位生成一条合法指令。 */
-  autoCommand(): PendingAction[] {
-    return this.awaitingUnits.map((unit) => chooseAutoAllyAction(unit, this.units, this.rng));
-  }
-
-  // -------------------------------------------------------------------------
-  // 阶段 1：回合开始
-  // -------------------------------------------------------------------------
-
-  private async beginTurn(): Promise<void> {
-    this.turn += 1;
-    this.blocked = new Set<string>();
-    this.queued = [];
-    this.enterPhase('turnStart');
-    this.logIt('phase', `—— 第 ${this.turn} 回合 ——`);
-    await this.director?.onTurnStart?.(this.turn);
-
-    // 必须早于其他回合开始效果：否则这回合刚站进冻伤区，要等下回合才生效
-    await this.syncTerrainStatuses();
-
-    for (const unit of this.units) {
-      if (!isAlive(unit)) continue;
-
-      unit.hasActed = false;
-      unit.isDefending = false;
-
-      const mp = gainMp(unit, BALANCE.mpRegenPerTurn);
-      const sp = gainSp(unit, BALANCE.spRegenPerTurn);
-      this.logIt('resource', `${unit.name} 自然回复 ${mp} MP、${sp} 愤怒`);
-
-      await this.applyStatusTicks(unit, 'turnStart');
-    }
-
-    this.enterPhase('commandInput');
-  }
-
-  /**
-   * 地形同步：站在哪个区域就获得该区域的状态，走出去就移除。
-   *
-   * 这是「站位决定增益/减益」的唯一落点。地形效果不需要谁在下指令时特殊照顾，
-   * 只要每回合开始同步一次，剩下的全交给普通的状态结算流程 ——
-   * 想加一个新地形，只改 data/battlefields.ts，这里一行都不用动。
-   */
-  private async syncTerrainStatuses(): Promise<void> {
-    for (const unit of this.units) {
-      if (!isAlive(unit)) continue;
-
-      const { zone, statusIds } = desiredTerrainEffects(this.battlefield, unit.position);
-      const desired = new Set(statusIds);
-
-      // 1) 先清掉「已离开的区域」留下的状态
-      for (const status of [...unit.statuses]) {
-        if (!isTerrainStatus(status)) continue;
-        if (desired.has(status.def.id)) continue;
-
-        removeStatus(unit, status.def.id);
-        this.logIt('status', `${unit.name} 脱离地形影响，「${status.def.name}」消退`);
-      }
-
-      // 2) 再施加（或刷新）当前区域的状态
-      if (!zone) continue;
-
-      for (const effect of zone.effects) {
-        const already = unit.statuses.some((status) => status.def.id === effect.id);
-        applyStatus(unit, effect, terrainSourceId(zone.id));
-        if (already) continue;
-
-        this.logIt('status', `${unit.name} 受「${zone.name}」影响，获得「${effect.name}」`);
-        await this.director?.onStatus?.({ unit, name: effect.name, kind: effect.kind });
-      }
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // 阶段 3：状态结算
-  // -------------------------------------------------------------------------
-
-  private runStatusSettlement(): void {
-    for (const unit of this.units) {
-      if (!isAlive(unit)) continue;
-
-      const blocker = blockingStatus(unit);
-      if (blocker) {
-        this.blocked.add(unit.id);
-        this.logIt('status', `${unit.name} 因「${blocker.def.name}」本回合无法行动`);
-      }
-
-      const modifiers = describeModifiers(unit);
-      if (modifiers) this.logIt('status', `${unit.name} 属性修正：${modifiers}`);
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // 阶段 4：执行玩家指令
-  // -------------------------------------------------------------------------
-
-  private async runExecuteCommands(): Promise<void> {
-    const submitted = new Map(this.pending.map((action) => [action.actorId, action]));
-    const queued: PendingAction[] = [];
-
-    for (const unit of this.survivorsOf('ally')) {
-      if (!unit.isPlayerControlled || this.blocked.has(unit.id)) continue;
-
-      let action: PendingAction = submitted.get(unit.id) ?? {
-        actorId: unit.id,
-        commandId: 'defend',
-      };
-      if (!submitted.has(unit.id)) {
-        this.logIt('system', `${unit.name} 没有收到指令，自动转入防御`);
-      }
-
-      let def = getCommand(action.commandId);
-      if (!def.resolvesImmediately) {
-        const usable = checkUsable(unit, def);
-        if (!usable.ok) {
-          this.logIt(
-            'system',
-            `${unit.name} 无法使用「${def.label}」（${usable.reason}），降级为普通攻击`,
-          );
-          action = { actorId: unit.id, commandId: 'attack' };
-          def = getCommand('attack');
-        }
-      }
-
-      if (def.resolvesImmediately) {
-        await this.executeImmediate(unit, action, def);
-        if (this.fled) return;
-      } else {
-        queued.push(action);
-      }
-    }
-
-    this.queued = queued;
-  }
-
-  /** 立即结算的指令：防御、逃跑。 */
-  private async executeImmediate(
-    actor: BattleUnit,
-    action: PendingAction,
-    def: CommandDef,
-  ): Promise<void> {
-    await this.director?.beforeAction?.(actor, action, undefined);
-
-    if (def.id === 'defend') {
-      actor.isDefending = true;
-      const gained = gainSp(actor, BALANCE.defendSpReward);
-      this.logIt('action', `${actor.name} 摆出防御姿态（减伤 50%，愤怒 +${gained}）`);
-    } else if (def.id === 'flee') {
-      const chance = this.fleeChance(actor);
-      if (this.rng.chance(chance)) {
-        this.fled = true;
-        this.logIt('system', `${actor.name} 带着全队脱离了战斗`);
-      } else {
-        const gained = gainSp(actor, BALANCE.fleeFailSpReward);
-        this.logIt('system', `逃跑失败！${actor.name} 只好硬着头皮留下（愤怒 +${gained}）`);
-      }
-    } else {
-      this.logIt('system', `「${def.label}」没有立即效果`);
-    }
-
-    await this.director?.afterAction?.(actor);
-  }
-
-  private fleeChance(actor: BattleUnit): number {
-    const foes = enemiesOf(this.units, actor);
-    if (foes.length === 0) return 1;
-
-    const avgFoeSpd =
-      foes.reduce((sum, foe) => sum + effectiveStat(foe, 'spd'), 0) / foes.length;
-    const diff = effectiveStat(actor, 'spd') - avgFoeSpd;
-    return clamp(BALANCE.fleeBaseChance + diff * BALANCE.fleeSpdFactor, 0.05, 0.95);
-  }
-
-  // -------------------------------------------------------------------------
-  // 阶段 5：敌我双方行动
-  // -------------------------------------------------------------------------
-
-  private async runBothSidesAction(): Promise<void> {
-    const actors = this.units
-      .filter((unit) => isAlive(unit) && !this.blocked.has(unit.id))
-      .sort(
-        (a, b) =>
-          effectiveStat(b, 'spd') - effectiveStat(a, 'spd') || (a.id < b.id ? -1 : 1),
-      );
-
-    for (const actor of actors) {
-      if (!isAlive(actor)) {
-        this.logIt('system', `${actor.name} 在行动前已经倒下`);
-        continue;
-      }
-
-      actor.hasActed = true;
-
-      const queued = actor.isPlayerControlled
-        ? this.queued.find((action) => action.actorId === actor.id)
-        : undefined;
-
-      await this.executeAction(actor, queued ?? chooseEnemyAction(actor, this.units, this.rng));
-
-      if (this.finishIfOver()) return;
-    }
-  }
+  // ==========================================================================
+  // 指令执行
+  // ==========================================================================
 
   private async executeAction(actor: BattleUnit, action: PendingAction): Promise<void> {
     const def = getCommand(action.commandId);
@@ -649,13 +572,25 @@ export class Battle {
         break;
       }
 
-      // 这两条在「执行玩家指令阶段」就结算完了，不会走到这里。
-      case 'defend':
-      case 'flee':
+      case 'defend': {
+        actor.isDefending = true;
+        const gained = gainSp(actor, BALANCE.defendSpReward);
+        this.logIt('action', `${actor.name} 摆出防御姿态（减伤 50%，愤怒 +${gained}）`);
         break;
-    }
+      }
 
-    await this.director?.afterAction?.(actor);
+      case 'flee': {
+        const chance = this.fleeChance(actor);
+        if (this.rng.chance(chance)) {
+          this.fled = true;
+          this.logIt('system', `${actor.name} 带着全队脱离了战斗`);
+        } else {
+          const gained = gainSp(actor, BALANCE.fleeFailSpReward);
+          this.logIt('system', `逃跑失败！${actor.name} 只好硬着头皮留下（愤怒 +${gained}）`);
+        }
+        break;
+      }
+    }
   }
 
   private async strike(
@@ -755,23 +690,53 @@ export class Battle {
     return fallback;
   }
 
-  // -------------------------------------------------------------------------
-  // 阶段 6：行动结束判定
-  // -------------------------------------------------------------------------
+  private fleeChance(actor: BattleUnit): number {
+    const foes = enemiesOf(this.units, actor);
+    if (foes.length === 0) return 1;
 
-  private async runActionEnd(): Promise<void> {
+    const avgFoeSpd =
+      foes.reduce((sum, foe) => sum + effectiveStat(foe, 'spd'), 0) / foes.length;
+    const diff = effectiveStat(actor, 'spd') - avgFoeSpd;
+    return clamp(BALANCE.fleeBaseChance + diff * BALANCE.fleeSpdFactor, 0.05, 0.95);
+  }
+
+  // ==========================================================================
+  // 状态与地形
+  // ==========================================================================
+
+  /**
+   * 地形同步：站在哪个区域就获得该区域的状态，走出去就移除。
+   *
+   * 这是「站位决定增益/减益」的唯一落点。想加一个新地形，
+   * 只改 data/battlefields.ts，这里一行都不用动。
+   */
+  private async syncTerrainStatuses(): Promise<void> {
     for (const unit of this.units) {
       if (!isAlive(unit)) continue;
-      await this.applyStatusTicks(unit, 'actionEnd');
-    }
 
-    for (const unit of this.units) {
-      if (!isAlive(unit)) continue;
+      const { zone, statusIds } = desiredTerrainEffects(this.battlefield, unit.position);
+      const desired = new Set(statusIds);
 
-      for (const status of decrementDurations(unit)) {
-        this.logIt('status', `${unit.name} 的「${status.def.name}」结束了`);
+      // 1) 先清掉「已离开的区域」留下的状态
+      for (const status of [...unit.statuses]) {
+        if (!isTerrainStatus(status)) continue;
+        if (desired.has(status.def.id)) continue;
+
+        removeStatus(unit, status.def.id);
+        this.logIt('status', `${unit.name} 脱离地形影响，「${status.def.name}」消退`);
       }
-      unit.isDefending = false;
+
+      // 2) 再施加（或刷新）当前区域的状态
+      if (!zone) continue;
+
+      for (const effect of zone.effects) {
+        const already = unit.statuses.some((status) => status.def.id === effect.id);
+        applyStatus(unit, effect, terrainSourceId(zone.id));
+        if (already) continue;
+
+        this.logIt('status', `${unit.name} 受「${zone.name}」影响，获得「${effect.name}」`);
+        await this.director?.onStatus?.({ unit, name: effect.name, kind: effect.kind });
+      }
     }
   }
 
@@ -811,9 +776,9 @@ export class Battle {
     }
   }
 
-  // -------------------------------------------------------------------------
+  // ==========================================================================
   // 收尾
-  // -------------------------------------------------------------------------
+  // ==========================================================================
 
   private finishIfOver(): boolean {
     if (this.result !== null) return true;
@@ -829,7 +794,7 @@ export class Battle {
   }
 
   private finish(outcome: BattleOutcome): boolean {
-    this.result = { outcome, turns: this.turn };
+    this.result = { outcome, turns: this.round };
     this.enterPhase(outcome);
 
     const text =
@@ -855,25 +820,27 @@ export class Battle {
   }
 
   private logIt(kind: LogKind, text: string): void {
-    const entry: BattleLogEntry = { turn: this.turn, kind, text };
+    const entry: BattleLogEntry = { round: this.round, kind, text };
     this.log.push(entry);
     this.events.emit('log', entry);
   }
+
+  /** 把某个我方单位的落点与阵位写进日志 —— 玩家据此看清这个阵法的代价。 */
+  private reportPosition(unit: BattleUnit): void {
+    const { zone } = desiredTerrainEffects(this.battlefield, unit.position);
+    const slot = this.formationSlotOf(unit.id);
+    const who = slot ? `${unit.name}（${slot.role}）` : unit.name;
+
+    this.logIt(
+      'status',
+      zone ? `${who} 立于「${zone.name}」 —— ${zone.desc}` : `${who} 处于普通地面`,
+    );
+  }
 }
 
-/** 列出与基础值不同的属性，用于日志与调试。 */
-function describeModifiers(unit: BattleUnit): string {
-  const parts: string[] = [];
-  for (const key of STAT_KEYS) {
-    const base = unit.stats[key];
-    if (base === 0) continue;
-    const effective = effectiveStat(unit, key);
-    if (effective === base) continue;
-    const percent = Math.round((effective / base - 1) * 100);
-    parts.push(`${key}${percent >= 0 ? '+' : ''}${percent}%`);
-  }
-  return parts.join('，');
-}
+// ---------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------
 
 function hasStatus(unit: BattleUnit, id: string): boolean {
   return unit.statuses.some((status) => status.def.id === id);

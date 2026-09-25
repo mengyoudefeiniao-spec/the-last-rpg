@@ -1,3 +1,4 @@
+import { BALANCE } from '../shared/config/balance.ts';
 import { getBattlefield } from '../shared/data/battlefields.ts';
 import { getEnvironment, getWeather } from '../shared/data/environments.ts';
 import { getFormation } from '../shared/data/formations.ts';
@@ -13,6 +14,7 @@ import type {
 import type {
   BattleRecord,
   BattleSnapshot,
+  BattleTick,
   Scenery,
   StatusSnapshot,
   UnitSnapshot,
@@ -25,6 +27,7 @@ import {
 } from '../shared/systems/battle/battle.ts';
 import { createUnit, isAlive } from '../shared/systems/battle/battle-unit.ts';
 import { COMMAND_ORDER, checkUsable, getCommand } from '../shared/systems/battle/commands.ts';
+import { effectiveStat } from '../shared/systems/battle/status-effects.ts';
 import { isTerrainStatus } from '../shared/systems/battle/terrain.ts';
 
 /**
@@ -32,13 +35,13 @@ import { isTerrainStatus } from '../shared/systems/battle/terrain.ts';
  *
  * 它实现 BattleDirector，但什么都不演，只把动作点记成一串事件。
  * Battle 完全不知道对面是浏览器还是记录器：它照旧在每个动作点 await，
- * 而这里同步 return，于是整个回合一口气算完，产出一份可供客户端播放的剧本。
+ * 而这里同步 return，于是结算一口气算完，产出一份可供客户端播放的剧本。
  */
 class RecordingDirector implements BattleDirector {
   private records: BattleRecord[] = [];
 
-  onTurnStart(turn: number): void {
-    this.records.push({ kind: 'turnStart', turn });
+  onRoundStart(round: number): void {
+    this.records.push({ kind: 'roundStart', round });
   }
 
   beforeAction(actor: BattleUnit, action: PendingAction, target: BattleUnit | undefined): void {
@@ -112,6 +115,8 @@ export interface SessionOptions {
  * 它是这个游戏目前唯一的「全局缓存」：权威状态全在这里，
  * 客户端手上那份 snapshot 只是投影。任何状态变更都必须走这里的方法，
  * 客户端没有旁路 —— 这是避免「后期扩展出不可修复 bug」的结构性保证。
+ *
+ * 时间也由它把关：节拍由 server.ts 驱动，会话只负责「前进多少毫秒」。
  */
 export class BattleSession {
   readonly id: string;
@@ -120,7 +125,6 @@ export class BattleSession {
 
   private battle: Battle;
   private readonly director = new RecordingDirector();
-  private busy = false;
 
   private constructor(id: string, config: PartyConfig, battle: Battle) {
     this.id = id;
@@ -140,12 +144,16 @@ export class BattleSession {
     return new BattleSession(options.sessionId, config, battle);
   }
 
+  get finished(): boolean {
+    return this.battle.finished;
+  }
+
   /** 对外状态快照。 */
   snapshot(): BattleSnapshot {
     return {
       sessionId: this.id,
       phase: this.battle.phase,
-      turn: this.battle.turn,
+      round: this.battle.round,
       battlefield: this.battle.battlefield,
       formation: this.battle.formation,
       scenery: this.scenery(),
@@ -153,6 +161,21 @@ export class BattleSession {
       awaitingUnitIds: this.battle.awaitingUnits.map((unit) => unit.id),
       log: [...this.battle.log],
       result: this.battle.result,
+    };
+  }
+
+  /**
+   * 行动条心跳：只带条的位置与「谁现在能操作」。
+   * 完整快照太大，而行动条要高频刷新，所以单独走这条路。
+   */
+  tick(): BattleTick {
+    return {
+      sessionId: this.id,
+      gauges: this.battle.units.map((unit) => ({
+        unitId: unit.id,
+        gauge: isAlive(unit) ? Math.round(unit.actionGauge) : 0,
+      })),
+      awaitingUnitIds: this.battle.awaitingUnits.map((unit) => unit.id),
     };
   }
 
@@ -178,31 +201,20 @@ export class BattleSession {
     await this.battle.beginBattle();
   }
 
-  async submitCommands(actions: readonly PendingAction[]): Promise<void> {
-    if (this.busy) throw new Error('上一轮仍在结算中，请稍候');
-    if (this.battle.phase !== 'commandInput') {
-      throw new Error(`当前阶段是 ${this.battle.phase}，不接受指令`);
-    }
+  /** 推进一个节拍。节拍由 server.ts 驱动，会话只管前进多少毫秒。 */
+  async advance(deltaMs: number): Promise<void> {
+    await this.battle.advance(deltaMs);
+  }
 
-    this.busy = true;
-    try {
-      await this.battle.submit(actions);
-    } finally {
-      this.busy = false;
-    }
+  /** 为某个行动值已满的单位下达指令。 */
+  async submitAction(unitId: string, action: PendingAction): Promise<void> {
+    await this.battle.submitAction(unitId, action);
   }
 
   /** 手动触发一个剧情事件（目前只有演示用的天雷）。 */
   async triggerEvent(eventId: string): Promise<void> {
-    if (this.busy) throw new Error('上一轮仍在结算中，请稍候');
-
     const def = getStageEvent(eventId);
-    this.busy = true;
-    try {
-      await this.battle.triggerStageEvent(def);
-    } finally {
-      this.busy = false;
-    }
+    await this.battle.triggerStageEvent(def);
   }
 
   // -------------------------------------------------------------------------
@@ -219,6 +231,9 @@ export class BattleSession {
       captured: unit.captured,
       alive: isAlive(unit),
       isPlayerControlled: unit.isPlayerControlled,
+      gauge: Math.round(unit.actionGauge),
+      gaugePerSecond: effectiveStat(unit, 'spd') * BALANCE.gaugeRate,
+      awaitingCommand: unit.awaitingCommand,
     };
 
     if (unit.isPlayerControlled) {

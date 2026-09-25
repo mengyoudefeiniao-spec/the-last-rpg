@@ -206,7 +206,7 @@ export class BattleStage {
 
   private async playRecord(record: BattleRecord): Promise<void> {
     switch (record.kind) {
-      case 'turnStart':
+      case 'roundStart':
         this.resetStances();
         break;
 

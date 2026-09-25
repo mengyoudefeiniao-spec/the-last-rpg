@@ -13,18 +13,13 @@ import type { BattleMirror } from '../state/battle-mirror.ts';
 /** 阶段的中文名，显示在顶栏。 */
 const PHASE_LABELS: Record<BattlePhase, string> = {
   deployment: '布阵',
-  turnStart: '回合开始',
-  commandInput: '选择指令',
-  statusSettlement: '状态结算',
-  executeCommands: '执行玩家指令',
-  bothSidesAction: '敌我双方行动',
-  actionEnd: '行动结束判定',
+  battle: '交战中',
   victory: '战斗胜利',
   defeat: '战斗失败',
   fled: '已脱离战斗',
 };
 
-/** 演出速度档位。十人一回合在 1 倍速下约 8 秒，默认给「快」。 */
+/** 演出速度档位。 */
 const SPEED_PRESETS: ReadonlyArray<{ label: string; value: number }> = [
   { label: '慢', value: 0.6 },
   { label: '常规', value: 1 },
@@ -46,7 +41,8 @@ export interface PartyConfigPatch {
 /** 界面能发起的意图。它们都会被转成协议消息发给服务端 —— 界面自己不改任何状态。 */
 export interface BattleViewActions {
   onBeginBattle: () => void;
-  onSubmit: (actions: PendingAction[]) => void;
+  /** 为某个行动值已满的单位下达指令。 */
+  onAct: (unitId: string, action: PendingAction) => void;
   onRestart: () => void;
   /** 保存队伍配置（阵法 / 战场 / 环境 / 天气）并重开一局。 */
   onSavePartyConfig: (patch: PartyConfigPatch) => void;
@@ -55,10 +51,10 @@ export interface BattleViewActions {
 }
 
 /**
- * 战斗 HUD：顶栏、布阵面板 / 指令栏、日志、队伍配置弹窗。
+ * 战斗 HUD：顶栏、右上角行动条、布阵面板 / 指令栏、日志、队伍配置弹窗。
  *
- * 它只读 BattleMirror 并把玩家意图交给 actions —— 既不推导战斗，也不保存状态。
- * 单位与阵图由 BattleStage 画在 3D 战场里，这里只把「当前谁能操作」同步过去做高亮。
+ * 行动条是这块界面里唯一每帧刷新的东西 —— 服务端每 100ms 才报一次行动值，
+ * 中间的空白靠 mirror.displayGauge() 按速度插值补平。
  */
 export class BattleView {
   private readonly root: HTMLElement;
@@ -76,17 +72,19 @@ export class BattleView {
   private readonly logEl: HTMLElement;
   private readonly overlayEl: HTMLElement;
   private readonly dialogEl: HTMLElement;
+  private readonly turnOrderEl: HTMLElement;
+  private readonly trackEl: HTMLElement;
   private readonly speedButtons: HTMLElement[];
 
   private stage: BattleStage | undefined;
   private speed = DEFAULT_SPEED;
 
-  /** 本回合已下达的指令。 */
-  private pending: PendingAction[] = [];
-  private pickIndex = 0;
+  /** 正在等待选目标的那条指令。 */
   private awaitingTarget: CommandId | null = null;
   private renderedLog = 0;
   private renderedSession = '';
+  /** 行动条的补间循环。 */
+  private frame = 0;
 
   /** 配置弹窗里未提交的选择。关闭时丢弃。 */
   private draft: PartyConfigPatch = {};
@@ -140,8 +138,23 @@ export class BattleView {
     this.dialogEl = pick(root, '.config-dialog');
     this.speedButtons = [...root.querySelectorAll<HTMLElement>('.game__speed [data-speed]')];
 
+    // 行动条叠在 3D 战场的右上角 —— 它属于画面，不属于日志区
+    const turnOrder = document.createElement('div');
+    turnOrder.className = 'turn-order';
+    turnOrder.hidden = true;
+    turnOrder.innerHTML = `
+      <div class="turn-order__head">
+        <span>行动顺序</span>
+        <span class="turn-order__note">条满即可行动</span>
+      </div>
+      <div class="turn-order__track"></div>`;
+    this.stageEl.appendChild(turnOrder);
+    this.turnOrderEl = turnOrder;
+    this.trackEl = pick(turnOrder, '.turn-order__track');
+
     this.bindEvents();
     this.refresh();
+    this.frame = requestAnimationFrame(this.tickGauges);
   }
 
   /** 3D 战场要挂进这个容器。 */
@@ -156,6 +169,7 @@ export class BattleView {
   }
 
   destroy(): void {
+    cancelAnimationFrame(this.frame);
     this.stage = undefined;
   }
 
@@ -164,7 +178,7 @@ export class BattleView {
     const mirror = this.mirror;
 
     this.turnEl.textContent =
-      mirror.phase === 'deployment' ? '布阵阶段' : `第 ${mirror.turn} 回合`;
+      mirror.phase === 'deployment' ? '布阵阶段' : `第 ${mirror.round} 轮`;
     this.phaseEl.textContent = `阶段：${PHASE_LABELS[mirror.phase]}`;
     this.formationEl.textContent = mirror.formation ? `阵：${mirror.formation.name}` : '';
     this.sceneryEl.textContent = mirror.scenery
@@ -176,8 +190,29 @@ export class BattleView {
     this.renderLog();
     this.renderSpeed();
     this.renderDialog();
+    this.renderTurnOrder();
     this.syncStage();
   }
+
+  /**
+   * 行动条心跳到达时调用。
+   *
+   * 如果「谁能操作」这份名单变了，就不能只重画行动条 —— 指令栏、提示、场上高亮
+   * 都得跟着变，否则会出现「行动条已经亮了、底下却还写着推进中」的矛盾画面。
+   */
+  refreshGauges(): void {
+    const awaitingKey = this.mirror.awaitingUnitIds.join(',');
+    if (awaitingKey !== this.lastAwaitingKey) {
+      this.lastAwaitingKey = awaitingKey;
+      this.refresh();
+      return;
+    }
+
+    this.renderTurnOrder();
+  }
+
+  /** 上次渲染时的「可操作名单」，用来判断要不要整体重画。 */
+  private lastAwaitingKey = '';
 
   setConnectionStatus(status: ClientStatus, detail?: string): void {
     const text =
@@ -194,7 +229,7 @@ export class BattleView {
     this.hintEl.innerHTML = `<span class="hint hint--error">服务端拒绝：${escapeHtml(message)}</span>`;
   }
 
-  /** 3D 舞台的拾取回调：只有选目标这一种用途了（站位由阵法定，不再点人换位）。 */
+  /** 3D 舞台的拾取回调：只有「选目标」这一种用途了。 */
   pickUnit(unitId: string): void {
     if (this.mirror.playing || !this.awaitingTarget) return;
 
@@ -244,12 +279,10 @@ export class BattleView {
     pick(this.root, '.game__restart').addEventListener('click', () => {
       this.actions.onRestart();
     });
-
     pick(this.root, '.game__event').addEventListener('click', () => {
       this.actions.onTriggerEvent(DEMO_EVENT_ID);
     });
 
-    // 弹窗：选项点击与底部按钮都走委托
     this.overlayEl.addEventListener('click', (event) => {
       if (event.target === this.overlayEl) {
         this.closeConfig();
@@ -280,7 +313,7 @@ export class BattleView {
   }
 
   private onCommandClick(commandId: CommandId): void {
-    if (this.mirror.phase !== 'commandInput' || this.mirror.playing) return;
+    if (this.mirror.playing) return;
 
     const actor = this.currentUnit();
     if (!actor) return;
@@ -296,27 +329,15 @@ export class BattleView {
     this.commitAction({ actorId: actor.id, commandId });
   }
 
+  /** 把这个单位的指令交给服务端。它的行动条此刻必须已经满了 —— 不满服务端会拒绝。 */
   private commitAction(action: PendingAction): void {
-    this.pending.push(action);
     this.awaitingTarget = null;
-    this.pickIndex += 1;
-
-    if (this.pickIndex >= this.unitsToCommand().length) {
-      const actions = this.pending.slice();
-      this.pending = [];
-      this.pickIndex = 0;
-      this.actions.onSubmit(actions);
-    } else {
-      this.refresh();
-    }
+    this.actions.onAct(action.actorId, action);
   }
 
-  private unitsToCommand(): UnitSnapshot[] {
-    return this.mirror.awaitingUnits;
-  }
-
+  /** 当前可操作的单位：服务端给的名单里的第一个。 */
   private currentUnit(): UnitSnapshot | undefined {
-    return this.unitsToCommand()[this.pickIndex];
+    return this.mirror.awaitingUnits[0];
   }
 
   private availabilityOf(unit: UnitSnapshot, id: CommandId): { ok: boolean; reason?: string } {
@@ -336,18 +357,66 @@ export class BattleView {
   }
 
   // -------------------------------------------------------------------------
+  // 行动条
+  // -------------------------------------------------------------------------
+
+  /** 每帧刷新行动条：心跳之间的空白靠 displayGauge 的插值补平。 */
+  private readonly tickGauges = (): void => {
+    this.frame = requestAnimationFrame(this.tickGauges);
+    this.renderTurnOrder();
+  };
+
+  /**
+   * 右上角的行动条。
+   *
+   * 每个单位一个图标，位置就是它的行动值 —— 起点在最左，行动点在最右那道亮线。
+   * 谁快谁慢一眼能看出来：跑得快的图标会明显走在前面。条满的图标会亮起来，
+   * 那才是能操作的角色。
+   */
+  private renderTurnOrder(): void {
+    const mirror = this.mirror;
+
+    if (mirror.phase === 'deployment' || mirror.sessionId === '') {
+      this.turnOrderEl.hidden = true;
+      return;
+    }
+
+    this.turnOrderEl.hidden = false;
+
+    // 同阵营里数一下序号 —— 用来把挨得近的图标上下错开，不然会叠死
+    const seen = new Map<string, number>();
+
+    const chips = mirror.units
+      .map((unit) => {
+        const slot = seen.get(unit.side) ?? 0;
+        seen.set(unit.side, slot + 1);
+
+        const gauge = Math.max(0, Math.min(100, mirror.displayGauge(unit)));
+        const classes = ['turn-chip', `turn-chip--${unit.side}`];
+        if (unit.awaitingCommand) classes.push('is-ready');
+        if (!unit.alive) classes.push('is-down');
+
+        // 我方靠上、敌方靠下；同阵营内再错开三档
+        const rowBase = unit.side === 'ally' ? 2 : 28;
+        const top = rowBase + (slot % 3) * 8;
+        const label = unit.name.slice(0, 1);
+
+        return `<span class="${classes.join(' ')}"
+                      style="left:${gauge.toFixed(2)}%;top:${top}px"
+                      title="${escapeHtml(unit.name)} · ${Math.round(gauge)}%"
+                >${escapeHtml(label)}</span>`;
+      })
+      .join('');
+
+    this.trackEl.innerHTML = `<div class="turn-order__goal"></div>${chips}`;
+  }
+
+  // -------------------------------------------------------------------------
   // 队伍配置弹窗
   // -------------------------------------------------------------------------
 
   private openConfig(): void {
-    // 以当前生效的配置为草稿起点
-    const mirror = this.mirror;
-    this.draft = {
-      formationId: mirror.formation?.id,
-      battlefieldId: mirror.battlefield?.id,
-      environmentId: mirror.scenery?.environment.id,
-      weatherId: mirror.scenery?.weather.id,
-    };
+    this.draft = this.configFromMirror();
     this.overlayEl.hidden = false;
     this.renderDialog();
   }
@@ -432,31 +501,29 @@ export class BattleView {
       return;
     }
 
+    const result = mirror.result;
+    if (result) {
+      const text =
+        result.outcome === 'victory'
+          ? `战斗胜利！打了 ${result.turns} 轮。`
+          : result.outcome === 'defeat'
+            ? `全员倒下，战斗失败（撑了 ${result.turns} 轮）。`
+            : `成功脱离战斗（第 ${result.turns} 轮）。`;
+      this.hintEl.innerHTML = `<span class="hint hint--done">${text} 点「重开一局」再打一场。</span>`;
+      return;
+    }
+
     if (mirror.playing) {
       this.hintEl.innerHTML = '<span class="hint">演出中…</span>';
       return;
     }
 
-    const result = mirror.result;
-    if (result) {
-      const text =
-        result.outcome === 'victory'
-          ? `战斗胜利！用了 ${result.turns} 个回合。`
-          : result.outcome === 'defeat'
-            ? `全员倒下，战斗失败（坚持了 ${result.turns} 个回合）。`
-            : `成功脱离战斗（第 ${result.turns} 回合）。`;
-      this.hintEl.innerHTML = `<span class="hint hint--done">${text} 点「重开一局」再打一场。</span>`;
-      return;
-    }
-
-    if (mirror.phase !== 'commandInput') {
-      this.hintEl.innerHTML = `<span class="hint">${PHASE_LABELS[mirror.phase]}…</span>`;
-      return;
-    }
-
     const actor = this.currentUnit();
     if (!actor) {
-      this.hintEl.innerHTML = '<span class="hint">等待指令…</span>';
+      const waiting = mirror.awaitingUnits.length === 0;
+      this.hintEl.innerHTML = waiting
+        ? '<span class="hint">各方都在攒行动条 —— 条满的角色才能行动。</span>'
+        : '<span class="hint">等待指令…</span>';
       return;
     }
 
@@ -468,9 +535,10 @@ export class BattleView {
       return;
     }
 
-    const total = this.unitsToCommand().length;
     const role = actor.formationRole ? `（${escapeHtml(actor.formationRole)}）` : '';
-    this.hintEl.innerHTML = `<span class="hint">轮到 <b>${escapeHtml(actor.name)}</b>${role} 下达指令（${this.pickIndex + 1} / ${total}）</span>`;
+    const queued = mirror.awaitingUnits.length;
+    const extra = queued > 1 ? `　还有 ${queued - 1} 人也在等待指令` : '';
+    this.hintEl.innerHTML = `<span class="hint"><b>${escapeHtml(actor.name)}</b>${role} 的行动条已满 —— 下达指令${extra}</span>`;
   }
 
   private renderPanel(): void {
@@ -486,7 +554,7 @@ export class BattleView {
 
   /**
    * 布阵面板：把阵法、阵位与落点一次摊开给玩家看。
-   * 站位由阵法定死，这里不再是可操作项 —— 想调整只能回去换阵法。
+   * 站位由阵法决定，这里不是可操作项 —— 想调整只能回去换阵法。
    */
   private renderDeployPanel(): string {
     const formation = this.mirror.formation;
@@ -524,14 +592,20 @@ export class BattleView {
       <ul class="deploy__zones">${zones}</ul>`;
   }
 
+  /** 指令栏。没轮到人动手时不显示按钮，而是说明在等什么。 */
   private renderCommands(): string {
     const actor = this.currentUnit();
 
+    if (!actor) {
+      const note = this.mirror.result
+        ? '战斗已结束。'
+        : '行动条推进中 —— 条满的角色才能行动。';
+      return `<div class="waiting">${note}</div>`;
+    }
+
     return COMMAND_ORDER.map((id) => {
       const def = getCommand(id);
-      const availability = actor
-        ? this.availabilityOf(actor, id)
-        : { ok: false, reason: '当前没有可操作的单位' };
+      const availability = this.availabilityOf(actor, id);
 
       const classes = ['cmd'];
       if (!availability.ok) classes.push('cmd--disabled');
@@ -574,7 +648,7 @@ export class BattleView {
 
       const line = document.createElement('div');
       line.className = `log__line log__line--${entry.kind}`;
-      line.textContent = `[${entry.turn}] ${entry.text}`;
+      line.textContent = `[${entry.round}] ${entry.text}`;
       this.logEl.appendChild(line);
     }
 
@@ -592,10 +666,10 @@ export class BattleView {
 
     const mirror = this.mirror;
     const idle = !mirror.playing;
-    const canLook = idle && (mirror.phase === 'deployment' || mirror.phase === 'commandInput');
+    const canLook = idle && (mirror.phase === 'deployment' || mirror.phase === 'battle');
     stage.setInteractive(canLook);
 
-    // 只剩「选目标」一种拾取用途了 —— 布阵阶段不点人
+    // 只剩「选目标」一种拾取用途了
     stage.setPickMode(idle && this.awaitingTarget ? 'enemy' : 'none');
     stage.setActiveUnit(this.currentUnit()?.id);
   }

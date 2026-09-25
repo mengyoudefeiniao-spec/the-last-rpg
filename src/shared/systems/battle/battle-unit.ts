@@ -12,8 +12,10 @@ export function createUnit(init: BattleUnitInit): BattleUnit {
     stats: createStats(init.stats),
     statuses: [],
     position: init.position ? { ...init.position } : { x: 0, z: 0 },
+    actionGauge: 0,
+    awaitingCommand: false,
+    actedThisRound: false,
     isDefending: false,
-    hasActed: false,
     captured: false,
     isPlayerControlled: init.isPlayerControlled ?? init.side === 'ally',
   };
