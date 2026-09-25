@@ -5,11 +5,12 @@ import type {
   CommandId,
   PendingAction,
 } from '../data/types.ts';
+import type { BattleStage } from '../render/battle-stage.ts';
 import type { Battle } from '../systems/battle/battle.ts';
 import { isAlive } from '../systems/battle/battle-unit.ts';
 import { COMMAND_ORDER, checkUsable, getCommand } from '../systems/battle/commands.ts';
 
-/** 阶段的中文名，显示在顶栏与提示条。 */
+/** 阶段的中文名，显示在顶栏。 */
 const PHASE_LABELS: Record<BattlePhase, string> = {
   turnStart: '回合开始',
   commandInput: '选择指令',
@@ -22,6 +23,19 @@ const PHASE_LABELS: Record<BattlePhase, string> = {
   fled: '已脱离战斗',
 };
 
+/**
+ * 演出速度档位。
+ * 十人一回合的演出在 1 倍速下约 8 秒，容易让人以为卡住，所以默认给「快」。
+ */
+const SPEED_PRESETS: ReadonlyArray<{ label: string; value: number }> = [
+  { label: '慢', value: 0.6 },
+  { label: '常规', value: 1 },
+  { label: '快', value: 2 },
+  { label: '极快', value: 3.5 },
+];
+
+const DEFAULT_SPEED = 2;
+
 /** 日志面板最多保留的条数。 */
 const LOG_LIMIT = 80;
 
@@ -31,10 +45,10 @@ export interface BattleViewOptions {
 }
 
 /**
- * 战斗界面。
+ * 战斗 HUD：顶栏、指令栏、日志。
  *
- * 只订阅 Battle 的事件、只读它的状态 —— 战斗逻辑对 DOM 一无所知（见 src/README.md 的依赖方向）。
- * 指令收集流程：为每个存活的我方单位依次选指令 → 需要目标的指令再点敌人 → 全部选完自动提交。
+ * 单位本身由 BattleStage 用 three.js 画在 3D 战场里，这里只管外围界面，
+ * 并把「当前是谁在下指令」「是否在等选目标」同步给舞台去高亮。
  */
 export class BattleView {
   private readonly root: HTMLElement;
@@ -43,10 +57,15 @@ export class BattleView {
 
   private readonly turnEl: HTMLElement;
   private readonly phaseEl: HTMLElement;
-  private readonly fieldEl: HTMLElement;
+  private readonly cameraHintEl: HTMLElement;
+  private readonly stageEl: HTMLElement;
   private readonly hintEl: HTMLElement;
   private readonly commandsEl: HTMLElement;
   private readonly logEl: HTMLElement;
+  private readonly speedButtons: HTMLElement[];
+
+  private stage: BattleStage | undefined;
+  private speed = DEFAULT_SPEED;
 
   /** 本回合已下达的指令。 */
   private pending: PendingAction[] = [];
@@ -64,33 +83,38 @@ export class BattleView {
     this.battle = battle;
     this.onRestart = options.onRestart;
 
-    // 骨架只建一次：日志容器必须保留，才能做增量追加。
+    const speedButtonsHtml = SPEED_PRESETS.map(
+      (preset) => `<button type="button" data-speed="${preset.value}">${preset.label}</button>`,
+    ).join('');
+
     root.innerHTML = `
-      <div class="battle">
-        <header class="battle__header">
-          <span class="battle__turn">第 0 回合</span>
-          <span class="battle__phase"></span>
-          <button type="button" class="battle__restart">重新开始</button>
+      <div class="game">
+        <header class="game__header">
+          <span class="game__turn">第 0 回合</span>
+          <span class="game__phase"></span>
+          <span class="game__camera-hint"></span>
+          <div class="game__speed" title="行动演出速度">${speedButtonsHtml}</div>
+          <button type="button" class="game__restart">重新开始</button>
         </header>
-        <div class="battle__body">
-          <div class="battle__field"></div>
-          <aside class="battle__aside">
-            <h2 class="battle__aside-title">战斗日志</h2>
-            <div class="battle__log"></div>
-          </aside>
-        </div>
-        <footer class="battle__footer">
-          <div class="battle__hint"></div>
-          <div class="battle__commands"></div>
+        <div class="game__stage"></div>
+        <aside class="game__aside">
+          <h2 class="game__aside-title">战斗日志</h2>
+          <div class="game__log"></div>
+        </aside>
+        <footer class="game__footer">
+          <div class="game__hint"></div>
+          <div class="game__commands"></div>
         </footer>
       </div>`;
 
-    this.turnEl = pick(root, '.battle__turn');
-    this.phaseEl = pick(root, '.battle__phase');
-    this.fieldEl = pick(root, '.battle__field');
-    this.hintEl = pick(root, '.battle__hint');
-    this.commandsEl = pick(root, '.battle__commands');
-    this.logEl = pick(root, '.battle__log');
+    this.turnEl = pick(root, '.game__turn');
+    this.phaseEl = pick(root, '.game__phase');
+    this.cameraHintEl = pick(root, '.game__camera-hint');
+    this.stageEl = pick(root, '.game__stage');
+    this.hintEl = pick(root, '.game__hint');
+    this.commandsEl = pick(root, '.game__commands');
+    this.logEl = pick(root, '.game__log');
+    this.speedButtons = [...root.querySelectorAll<HTMLElement>('.game__speed [data-speed]')];
 
     this.bindEvents();
 
@@ -106,10 +130,35 @@ export class BattleView {
     this.render();
   }
 
-  /** 解除对 Battle 的订阅。旧界面被替换时必须调用，否则旧战斗仍会驱动已废弃的 DOM。 */
+  /** 3D 战场要挂进这个容器。 */
+  get stageContainer(): HTMLElement {
+    return this.stageEl;
+  }
+
+  /** 接上 3D 舞台，之后才能同步高亮、视角开关与演出速度。 */
+  attachStage(stage: BattleStage): void {
+    this.stage = stage;
+    this.applySpeed();
+    this.syncStage();
+  }
+
+  /** 解除对 Battle 的订阅。旧界面被替换时必须调用。 */
   destroy(): void {
     for (const dispose of this.disposers) dispose();
     this.disposers.length = 0;
+  }
+
+  /** 由 3D 舞台的射线拾取回调：玩家点了某个单位。 */
+  pickTarget(unitId: string): void {
+    if (!this.awaitingTarget) return;
+
+    const unit = this.battle.units.find((candidate) => candidate.id === unitId);
+    if (!unit || unit.side !== 'enemy' || !isAlive(unit)) return;
+
+    const actor = this.currentUnit();
+    if (!actor) return;
+
+    this.commitAction({ actorId: actor.id, commandId: this.awaitingTarget, targetId: unit.id });
   }
 
   // -------------------------------------------------------------------------
@@ -117,14 +166,6 @@ export class BattleView {
   // -------------------------------------------------------------------------
 
   private bindEvents(): void {
-    this.fieldEl.addEventListener('click', (event) => {
-      const card = closestFrom(event, '[data-unit-id]');
-      const unitId = card?.dataset.unitId;
-      if (!unitId) return;
-      const unit = this.battle.units.find((candidate) => candidate.id === unitId);
-      if (unit) this.onUnitClick(unit);
-    });
-
     this.commandsEl.addEventListener('click', (event) => {
       const button = closestFrom(event, '[data-command]');
       const commandId = button?.dataset.command as CommandId | undefined;
@@ -138,19 +179,18 @@ export class BattleView {
       }
     });
 
-    pick(this.root, '.battle__restart').addEventListener('click', () => {
+    pick(this.root, '.game__speed').addEventListener('click', (event) => {
+      const button = closestFrom(event, '[data-speed]');
+      const value = Number(button?.dataset.speed);
+      if (!Number.isFinite(value) || value <= 0) return;
+      this.speed = value;
+      this.applySpeed();
+      this.renderSpeed();
+    });
+
+    pick(this.root, '.game__restart').addEventListener('click', () => {
       this.onRestart?.();
     });
-  }
-
-  private onUnitClick(unit: BattleUnit): void {
-    if (!this.awaitingTarget) return;
-    if (unit.side !== 'enemy' || !isAlive(unit)) return;
-
-    const actor = this.currentUnit();
-    if (!actor) return;
-
-    this.commitAction({ actorId: actor.id, commandId: this.awaitingTarget, targetId: unit.id });
   }
 
   private onCommandClick(commandId: CommandId): void {
@@ -171,7 +211,7 @@ export class BattleView {
     this.commitAction({ actorId: actor.id, commandId });
   }
 
-  /** 记录一条指令，若全队都选完就提交给 Battle。 */
+  /** 记录一条指令；全队选完就交给 Battle 推进（异步，期间界面自动锁住）。 */
   private commitAction(action: PendingAction): void {
     this.pending.push(action);
     this.awaitingTarget = null;
@@ -179,8 +219,9 @@ export class BattleView {
 
     if (this.pickIndex >= this.unitsToCommand().length) {
       const actions = this.pending.slice();
-      this.resetCommands();
-      this.battle.submit(actions);
+      this.battle.submit(actions).catch((error: unknown) => {
+        console.error('[battle] 推进失败', error);
+      });
     } else {
       this.render();
     }
@@ -200,68 +241,46 @@ export class BattleView {
     return this.unitsToCommand()[this.pickIndex];
   }
 
+  private applySpeed(): void {
+    this.stage?.setSpeed(this.speed);
+  }
+
+  private renderSpeed(): void {
+    for (const button of this.speedButtons) {
+      button.classList.toggle('is-on', Number(button.dataset.speed) === this.speed);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // 渲染
   // -------------------------------------------------------------------------
 
   private render(): void {
-    this.turnEl.textContent = `第 ${this.battle.turn} 回合`;
-    this.phaseEl.textContent = `阶段：${PHASE_LABELS[this.battle.phase]}`;
+    const { battle } = this;
 
-    this.fieldEl.innerHTML = this.renderField();
+    this.turnEl.textContent = `第 ${battle.turn} 回合`;
+    this.phaseEl.textContent = `阶段：${PHASE_LABELS[battle.phase]}`;
+    this.cameraHintEl.textContent =
+      battle.phase === 'commandInput' && !battle.finished
+        ? '可拖动旋转视角 · 滚轮缩放'
+        : '';
+
     this.commandsEl.innerHTML = this.renderCommands();
     this.hintEl.innerHTML = this.renderHint();
     this.renderLog();
+    this.renderSpeed();
+    this.syncStage();
   }
 
-  private renderField(): string {
-    const enemies = this.battle.units.filter((unit) => unit.side === 'enemy');
-    const allies = this.battle.units.filter((unit) => unit.side === 'ally');
+  /** 把当前交互状态同步给 3D 舞台：视角开关、可点目标、当前操作者。 */
+  private syncStage(): void {
+    const stage = this.stage;
+    if (!stage) return;
 
-    return `
-      <section class="side side--enemy">
-        <h2 class="side__title">敌方</h2>
-        <div class="side__units">${enemies.map((unit) => this.unitCard(unit)).join('')}</div>
-      </section>
-      <section class="side side--ally">
-        <h2 class="side__title">我方</h2>
-        <div class="side__units">${allies.map((unit) => this.unitCard(unit)).join('')}</div>
-      </section>`;
-  }
-
-  private unitCard(unit: BattleUnit): string {
-    const { hp, maxHp, mp, maxMp, sp, maxSp } = unit.stats;
-    const alive = isAlive(unit);
-
-    const classes = ['unit', `unit--${unit.side}`];
-    if (!alive) classes.push('unit--down');
-    if (unit.isDefending) classes.push('unit--defending');
-    if (this.currentUnit()?.id === unit.id) classes.push('unit--active');
-    if (this.awaitingTarget && unit.side === 'enemy' && alive) classes.push('unit--targetable');
-
-    const tags: string[] = [];
-    if (unit.isDefending) tags.push('<span class="unit__tag">防御中</span>');
-    if (unit.captured) tags.push('<span class="unit__tag">已捕获</span>');
-    if (!alive && !unit.captured) tags.push('<span class="unit__tag unit__tag--down">已倒下</span>');
-
-    const statuses = unit.statuses
-      .map(
-        (status) =>
-          `<span class="status status--${status.def.kind}" title="${escapeHtml(status.def.desc)}">${escapeHtml(status.def.name)}·${status.remaining}</span>`,
-      )
-      .join('');
-
-    return `
-      <article class="${classes.join(' ')}" data-unit-id="${escapeHtml(unit.id)}">
-        <div class="unit__head">
-          <span class="unit__name">${escapeHtml(unit.name)}</span>
-          ${tags.join('')}
-        </div>
-        ${bar('hp', 'HP', hp, maxHp)}
-        ${bar('mp', 'MP', mp, maxMp)}
-        ${bar('sp', '愤怒', sp, maxSp)}
-        ${statuses ? `<div class="unit__statuses">${statuses}</div>` : ''}
-      </article>`;
+    const canCommand = this.battle.phase === 'commandInput' && !this.battle.finished;
+    stage.setInteractive(canCommand);
+    stage.setTargetable(this.awaitingTarget !== null);
+    stage.setActiveUnit(this.currentUnit()?.id);
   }
 
   private renderCommands(): string {
@@ -269,7 +288,9 @@ export class BattleView {
 
     return COMMAND_ORDER.map((id) => {
       const def = getCommand(id);
-      const usable = actor ? checkUsable(actor, def) : { ok: false, reason: '当前没有可操作的单位' };
+      const usable = actor
+        ? checkUsable(actor, def)
+        : { ok: false, reason: '当前没有可操作的单位' };
 
       const classes = ['cmd'];
       if (!usable.ok) classes.push('cmd--disabled');
@@ -309,7 +330,7 @@ export class BattleView {
     if (this.awaitingTarget) {
       const def = getCommand(this.awaitingTarget);
       return `
-        <span class="hint"><b>${escapeHtml(actor.name)}</b> 使用「${def.label}」—— 点击一个敌人作为目标</span>
+        <span class="hint"><b>${escapeHtml(actor.name)}</b> 使用「${def.label}」—— 点击场上的敌人作为目标</span>
         <button type="button" class="hint__cancel" data-action="cancel-target">取消</button>`;
     }
 
@@ -317,7 +338,7 @@ export class BattleView {
     return `<span class="hint">轮到 <b>${escapeHtml(actor.name)}</b> 下达指令（${this.pickIndex + 1} / ${total}）</span>`;
   }
 
-  /** 增量追加日志：一次战斗可能产生上百条，全量重建会丢掉滚动位置。 */
+  /** 增量追加日志：一场战斗上百条，全量重建会丢掉滚动位置。 */
   private renderLog(): void {
     while (this.renderedLog < this.battle.log.length) {
       const entry = this.battle.log[this.renderedLog] as BattleLogEntry;
@@ -355,15 +376,6 @@ function closestFrom(event: MouseEvent, selector: string): HTMLElement | null {
   if (!(target instanceof Element)) return null;
   const found = target.closest(selector);
   return found instanceof HTMLElement ? found : null;
-}
-
-function bar(kind: 'hp' | 'mp' | 'sp', label: string, value: number, max: number): string {
-  const percent = max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
-  return `
-    <div class="bar bar--${kind}">
-      <div class="bar__fill" style="width:${percent.toFixed(1)}%"></div>
-      <span class="bar__text">${label} ${Math.max(0, value)} / ${max}</span>
-    </div>`;
 }
 
 function formatCost(def: { cost: { mp?: number; sp?: number } }): string {

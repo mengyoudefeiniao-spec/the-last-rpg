@@ -1,0 +1,125 @@
+/* three.js 战场：头顶血条与飘字。CSS2DRenderer 把这些 DOM 投影到 3D 坐标上。 */
+
+.unit-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 84px;
+  padding: 3px 4px 4px;
+  background: rgba(8, 12, 20, 0.72);
+  border: 1px solid rgba(120, 140, 175, 0.35);
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1.2;
+  /* 交给 canvas 处理鼠标，否则挡住 OrbitControls 的拖拽 */
+  pointer-events: none;
+  transform: translateY(-6px);
+  transition: opacity 0.3s, border-color 0.2s, box-shadow 0.2s;
+}
+
+.unit-bar--ally {
+  border-color: rgba(78, 201, 176, 0.5);
+}
+
+.unit-bar--enemy {
+  border-color: rgba(224, 108, 117, 0.5);
+}
+
+.unit-bar.is-active {
+  border-color: #ffd479;
+  box-shadow: 0 0 10px rgba(255, 212, 121, 0.55);
+}
+
+.unit-bar.is-targetable {
+  border-color: #e06c75;
+  box-shadow: 0 0 12px rgba(224, 108, 117, 0.6);
+  animation: bar-pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes bar-pulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(224, 108, 117, 0.4); }
+  50% { box-shadow: 0 0 18px rgba(224, 108, 117, 0.85); }
+}
+
+.unit-bar.is-defending {
+  border-color: rgba(74, 134, 216, 0.85);
+}
+
+.unit-bar.is-down {
+  opacity: 0.4;
+  filter: grayscale(0.85);
+}
+
+.unit-bar__name {
+  font-weight: 700;
+  color: #e6edf8;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.unit-bar__track {
+  height: 6px;
+  background: #0d1119;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.unit-bar__track--thin {
+  height: 3px;
+}
+
+.unit-bar__fill {
+  display: block;
+  height: 100%;
+  width: 100%;
+  transition: width 0.28s ease;
+}
+
+.unit-bar__fill--hp { background: linear-gradient(90deg, #9d3130, #e0554c); }
+.unit-bar__fill--mp { background: linear-gradient(90deg, #2c5fa8, #5a9ae0); }
+.unit-bar__fill--sp { background: linear-gradient(90deg, #a86f12, #f0b243); }
+
+.unit-bar__statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-top: 1px;
+}
+
+.unit-bar__status {
+  padding: 0 4px;
+  font-size: 9.5px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.unit-bar__status--buff {
+  color: #8ee89c;
+  border-color: rgba(94, 194, 106, 0.5);
+  background: rgba(94, 194, 106, 0.15);
+}
+
+.unit-bar__status--debuff {
+  color: #daa2ea;
+  border-color: rgba(199, 107, 216, 0.5);
+  background: rgba(199, 107, 216, 0.15);
+}
+
+/* ------------------------------- 飘字 ------------------------------- */
+
+.float-text {
+  font-size: 17px;
+  font-weight: 800;
+  white-space: nowrap;
+  pointer-events: none;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.95);
+}
+
+.float-text--damage { color: #ff7a6e; }
+.float-text--crit { color: #ffcf3d; font-size: 23px; }
+.float-text--heal { color: #6ee89a; }
+.float-text--buff { color: #8ee89c; font-size: 14px; }
+.float-text--debuff { color: #daa2ea; font-size: 14px; }
+.float-text--info { color: #cbd8ec; font-size: 14px; }

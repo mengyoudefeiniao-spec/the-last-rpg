@@ -18,9 +18,12 @@ function makeBattle(seed: number): Battle {
   return new Battle({ units: createSampleBattleUnits().map(createUnit), seed });
 }
 
-/** 一路自动打到结束。顺带校验：只要没结束，就一定停在指令阶段等输入。 */
-function runToEnd(battle: Battle): Battle {
-  battle.start();
+/**
+ * 一路自动打到结束。
+ * 不挂 director，所以所有演出 await 都被跳过 —— 战斗瞬间跑完，这正是测试要的。
+ */
+async function runToEnd(battle: Battle): Promise<Battle> {
+  await battle.start();
   let guard = 0;
 
   while (!battle.finished) {
@@ -28,18 +31,18 @@ function runToEnd(battle: Battle): Battle {
     guard += 1;
     if (guard > MAX_TURNS) throw new Error(`超过 ${MAX_TURNS} 回合仍未分出胜负`);
 
-    battle.submit(battle.autoCommand());
+    await battle.submit(battle.autoCommand());
   }
 
   assert.notEqual(battle.phase, 'commandInput', '结束后不应停留在指令阶段');
   return battle;
 }
 
-test('同一套数据能打完一场完整战斗，且我方整体占优', () => {
+test('同一套数据能打完一场完整战斗，且我方整体占优', async () => {
   const outcomes = new Map<string, number>();
 
   for (let seed = 1; seed <= 30; seed += 1) {
-    const battle = runToEnd(makeBattle(seed));
+    const battle = await runToEnd(makeBattle(seed));
     const outcome = battle.result?.outcome ?? 'none';
     outcomes.set(outcome, (outcomes.get(outcome) ?? 0) + 1);
 
@@ -54,15 +57,15 @@ test('同一套数据能打完一场完整战斗，且我方整体占优', () =>
   );
 });
 
-test('一个回合内的阶段顺序与设计一致', () => {
+test('一个回合内的阶段顺序与设计一致', async () => {
   const battle = makeBattle(7);
   const phases: BattlePhase[] = [];
   battle.events.on('phase', (phase) => phases.push(phase));
 
-  battle.start();
+  await battle.start();
   phases.length = 0; // 只关心一个完整回合的循环
 
-  battle.submit(battle.autoCommand());
+  await battle.submit(battle.autoCommand());
 
   assert.deepEqual(phases, [
     'statusSettlement',
@@ -74,9 +77,9 @@ test('一个回合内的阶段顺序与设计一致', () => {
   ]);
 });
 
-test('HP / MP / SP 全程不越界', () => {
+test('HP / MP / SP 全程不越界', async () => {
   for (let seed = 1; seed <= 10; seed += 1) {
-    const battle = runToEnd(makeBattle(seed));
+    const battle = await runToEnd(makeBattle(seed));
 
     for (const unit of battle.units) {
       const { hp, maxHp, mp, maxMp, sp, maxSp } = unit.stats;
@@ -87,9 +90,9 @@ test('HP / MP / SP 全程不越界', () => {
   }
 });
 
-test('状态效果到期后会在行动结束判定阶段被移除', () => {
+test('状态效果到期后会在行动结束判定阶段被移除', async () => {
   const battle = makeBattle(3);
-  battle.start();
+  await battle.start();
 
   const boss = battle.units.find((unit) => unit.id === 'enemy.chieftain');
   assert.ok(boss, '找不到山魈首领');
@@ -97,7 +100,7 @@ test('状态效果到期后会在行动结束判定阶段被移除', () => {
   applyStatus(boss, getStatusDef('poison'), 'test', 1);
   assert.equal(boss.statuses.length, 1);
 
-  battle.submit(battle.autoCommand());
+  await battle.submit(battle.autoCommand());
 
   assert.ok(
     !boss.statuses.some((status) => status.def.id === 'poison'),
@@ -165,19 +168,55 @@ test('受击会积累愤怒（SP）', () => {
   assert.ok(target.stats.sp <= target.stats.maxSp, '愤怒不应超过上限');
 });
 
-test('逃跑成功会立即结束战斗', () => {
+test('逃跑成功会立即结束战斗', async () => {
   let fled = false;
 
   for (let seed = 1; seed <= 60 && !fled; seed += 1) {
     const battle = makeBattle(seed);
-    battle.start();
+    await battle.start();
 
     const actor = battle.awaitingUnits[0];
     assert.ok(actor, '首个回合应当有可操作的我方单位');
 
-    battle.submit([{ actorId: actor.id, commandId: 'flee' }]);
+    await battle.submit([{ actorId: actor.id, commandId: 'flee' }]);
     if (battle.result?.outcome === 'fled') fled = true;
   }
 
   assert.ok(fled, '60 个种子都没能逃跑成功，逃跑概率可能算错了');
+});
+
+test('挂了 director 时，演出点会被依次回调', async () => {
+  const battle = makeBattle(11);
+  const calls: string[] = [];
+
+  battle.director = {
+    onTurnStart: () => {
+      calls.push('turnStart');
+    },
+    beforeAction: (actor) => {
+      calls.push(`before:${actor.id}`);
+    },
+    onStrike: () => {
+      calls.push('strike');
+    },
+    afterAction: (actor) => {
+      calls.push(`after:${actor.id}`);
+    },
+  };
+
+  await battle.start();
+  calls.length = 0;
+  await battle.submit(battle.autoCommand());
+
+  assert.ok(calls.includes('turnStart'), '回合开始应当回调 onTurnStart');
+  assert.ok(
+    calls.some((call) => call.startsWith('before:')),
+    '至少应当有一次行动前摇',
+  );
+  assert.ok(calls.includes('strike'), '行动期间应当有伤害回调');
+
+  // 每个 before 都要配一个同名的 after，否则演出层会漏归位
+  const befores = calls.filter((call) => call.startsWith('before:')).map((c) => c.slice(7));
+  const afters = calls.filter((call) => call.startsWith('after:')).map((c) => c.slice(6));
+  assert.deepEqual(afters, befores, 'beforeAction 与 afterAction 必须成对');
 });

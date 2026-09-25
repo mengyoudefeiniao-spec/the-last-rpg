@@ -39,6 +39,49 @@ import {
   getStatusDef,
 } from './status-effects.ts';
 
+/** 一次伤害/治疗的结果，供表现层播受击、飘字、倒地。 */
+export interface StrikeReport {
+  /** 造成伤害的单位；DoT 之类没有攻击者时为 undefined。 */
+  attacker: BattleUnit | undefined;
+  target: BattleUnit;
+  damage: number;
+  healing: number;
+  crit: boolean;
+  defeated: boolean;
+  label: string;
+}
+
+/** 状态施加的结果。 */
+export interface StatusReport {
+  unit: BattleUnit;
+  name: string;
+  kind: 'buff' | 'debuff';
+}
+
+/**
+ * 表现层接口 —— 依赖倒置的关键。
+ *
+ * Battle 在这些节点暂停，等表现层演完再继续；不挂 director 时所有 await 直接跳过，
+ * 战斗瞬间跑完 —— 这正是单元测试与自动战斗想要的。
+ * 接口本身只涉及领域类型，不含任何 DOM 概念，所以逻辑层依然与渲染彻底解耦。
+ */
+export interface BattleDirector {
+  /** 回合开始，可播回合横幅。 */
+  onTurnStart?(turn: number): Promise<void> | void;
+  /** 某个单位即将行动：可让角色移动到位、播前摇。 */
+  beforeAction?(
+    actor: BattleUnit,
+    action: PendingAction,
+    target: BattleUnit | undefined,
+  ): Promise<void> | void;
+  /** 每次伤害/治疗结算后。 */
+  onStrike?(report: StrikeReport): Promise<void> | void;
+  /** 状态施加后。 */
+  onStatus?(report: StatusReport): Promise<void> | void;
+  /** 行动结束：角色归位。 */
+  afterAction?(actor: BattleUnit): Promise<void> | void;
+}
+
 export interface BattleOptions {
   units: BattleUnit[];
   /** 固定 seed 即可重放同一场战斗，便于复现 bug。 */
@@ -61,13 +104,15 @@ const STAT_KEYS: readonly StatKey[] = ['atk', 'def', 'mag', 'res', 'spd'];
  *   6. actionEnd        行动结束判定：DoT/HoT、状态倒计时与到期
  *   → 回到 1，直到一方全灭
  *
- * 注意：类本身对 DOM 一无所知。浏览器里由 BattleView 订阅事件渲染，
- * Node 里由测试订阅事件断言 —— 同一份战斗逻辑，两个消费者。
+ * 类本身对 DOM 一无所知，只通过事件总线广播，并在挂了 director 时暂停等待演出。
  */
 export class Battle {
   readonly units: BattleUnit[];
   readonly events = new EventBus<BattleEvents>();
   readonly log: BattleLogEntry[] = [];
+
+  /** 表现层。可以在构造之后再挂上。 */
+  director: BattleDirector | undefined;
 
   phase: BattlePhase = 'turnStart';
   turn = 0;
@@ -96,17 +141,17 @@ export class Battle {
   }
 
   /** 开始战斗：进入第 1 回合的指令阶段。 */
-  start(): void {
+  async start(): Promise<void> {
     if (this.turn !== 0) throw new Error('战斗已经开始，请新建实例');
-    this.beginTurn();
+    await this.beginTurn();
     this.events.emit('update', undefined);
   }
 
   /**
    * 提交一整个回合的指令，并推进到下一个指令阶段（或战斗结束）。
-   * 五个阶段全部同步跑完 —— 原型阶段不做演出动画。
+   * 挂了 director 时会在每个动作点暂停，等演出播完。
    */
-  submit(actions: readonly PendingAction[]): void {
+  async submit(actions: readonly PendingAction[]): Promise<void> {
     if (this.phase !== 'commandInput') {
       throw new Error(`当前阶段是 ${this.phase}，不接受指令`);
     }
@@ -117,18 +162,18 @@ export class Battle {
     if (this.finishIfOver()) return;
 
     this.enterPhase('executeCommands');
-    this.runExecuteCommands();
+    await this.runExecuteCommands();
     if (this.finishIfOver()) return;
 
     this.enterPhase('bothSidesAction');
-    this.runBothSidesAction();
+    await this.runBothSidesAction();
     if (this.finishIfOver()) return;
 
     this.enterPhase('actionEnd');
-    this.runActionEnd();
+    await this.runActionEnd();
     if (this.finishIfOver()) return;
 
-    this.beginTurn();
+    await this.beginTurn();
     this.events.emit('update', undefined);
   }
 
@@ -141,12 +186,13 @@ export class Battle {
   // 阶段 1：回合开始
   // -------------------------------------------------------------------------
 
-  private beginTurn(): void {
+  private async beginTurn(): Promise<void> {
     this.turn += 1;
     this.blocked = new Set<string>();
     this.queued = [];
     this.enterPhase('turnStart');
     this.logIt('phase', `—— 第 ${this.turn} 回合 ——`);
+    await this.director?.onTurnStart?.(this.turn);
 
     for (const unit of this.units) {
       if (!isAlive(unit)) continue;
@@ -158,7 +204,7 @@ export class Battle {
       const sp = gainSp(unit, BALANCE.spRegenPerTurn);
       this.logIt('resource', `${unit.name} 自然回复 ${mp} MP、${sp} 愤怒`);
 
-      this.applyStatusTicks(unit, 'turnStart');
+      await this.applyStatusTicks(unit, 'turnStart');
     }
 
     this.enterPhase('commandInput');
@@ -187,7 +233,7 @@ export class Battle {
   // 阶段 4：执行玩家指令
   // -------------------------------------------------------------------------
 
-  private runExecuteCommands(): void {
+  private async runExecuteCommands(): Promise<void> {
     const submitted = new Map(this.pending.map((action) => [action.actorId, action]));
     const queued: PendingAction[] = [];
 
@@ -216,7 +262,7 @@ export class Battle {
       }
 
       if (def.resolvesImmediately) {
-        this.executeImmediate(unit, def);
+        await this.executeImmediate(unit, action, def);
         if (this.fled) return;
       } else {
         queued.push(action);
@@ -227,15 +273,18 @@ export class Battle {
   }
 
   /** 立即结算的指令：防御、逃跑。 */
-  private executeImmediate(actor: BattleUnit, def: CommandDef): void {
+  private async executeImmediate(
+    actor: BattleUnit,
+    action: PendingAction,
+    def: CommandDef,
+  ): Promise<void> {
+    await this.director?.beforeAction?.(actor, action, undefined);
+
     if (def.id === 'defend') {
       actor.isDefending = true;
       const gained = gainSp(actor, BALANCE.defendSpReward);
       this.logIt('action', `${actor.name} 摆出防御姿态（减伤 50%，愤怒 +${gained}）`);
-      return;
-    }
-
-    if (def.id === 'flee') {
+    } else if (def.id === 'flee') {
       const chance = this.fleeChance(actor);
       if (this.rng.chance(chance)) {
         this.fled = true;
@@ -244,10 +293,11 @@ export class Battle {
         const gained = gainSp(actor, BALANCE.fleeFailSpReward);
         this.logIt('system', `逃跑失败！${actor.name} 只好硬着头皮留下（愤怒 +${gained}）`);
       }
-      return;
+    } else {
+      this.logIt('system', `「${def.label}」没有立即效果`);
     }
 
-    this.logIt('system', `「${def.label}」没有立即效果`);
+    await this.director?.afterAction?.(actor);
   }
 
   private fleeChance(actor: BattleUnit): number {
@@ -264,7 +314,7 @@ export class Battle {
   // 阶段 5：敌我双方行动
   // -------------------------------------------------------------------------
 
-  private runBothSidesAction(): void {
+  private async runBothSidesAction(): Promise<void> {
     const actors = this.units
       .filter((unit) => isAlive(unit) && !this.blocked.has(unit.id))
       .sort(
@@ -284,13 +334,13 @@ export class Battle {
         ? this.queued.find((action) => action.actorId === actor.id)
         : undefined;
 
-      this.executeAction(actor, queued ?? chooseEnemyAction(actor, this.units, this.rng));
+      await this.executeAction(actor, queued ?? chooseEnemyAction(actor, this.units, this.rng));
 
       if (this.finishIfOver()) return;
     }
   }
 
-  private executeAction(actor: BattleUnit, action: PendingAction): void {
+  private async executeAction(actor: BattleUnit, action: PendingAction): Promise<void> {
     const def = getCommand(action.commandId);
 
     // 兜底：资源在中途被 DoT 之类消耗掉的可能性很低，但落空也要有说法。
@@ -302,41 +352,63 @@ export class Battle {
     const foes = enemiesOf(this.units, actor);
     const target = this.resolveTarget(actor, def, action, foes);
 
+    await this.director?.beforeAction?.(actor, action, target);
+
     switch (def.id) {
       case 'attack': {
-        if (target) this.strike(actor, target, { kind: 'physical', mult: 1, canCrit: true, label: '普通攻击' });
+        if (target) {
+          await this.strike(actor, target, {
+            kind: 'physical',
+            mult: 1,
+            canCrit: true,
+            label: '普通攻击',
+          });
+        }
         break;
       }
 
       case 'spell': {
-        if (!target) break;
-        this.logIt('action', `${actor.name} 吟唱「炎爆术」，轰向 ${target.name}`);
-        this.strike(actor, target, { kind: 'magical', mult: 1.8, label: '炎爆术' });
-        if (isAlive(target) && !hasStatus(target, 'burn') && this.rng.chance(0.35)) {
-          this.inflict(target, getStatusDef('burn'), actor);
+        if (target) {
+          this.logIt('action', `${actor.name} 吟唱「炎爆术」，轰向 ${target.name}`);
+          await this.strike(actor, target, { kind: 'magical', mult: 1.8, label: '炎爆术' });
+          if (isAlive(target) && !hasStatus(target, 'burn') && this.rng.chance(0.35)) {
+            await this.inflict(target, getStatusDef('burn'), actor);
+          }
         }
         break;
       }
 
       case 'skill': {
-        if (!target) break;
-        this.logIt('action', `${actor.name} 释放特技「碎星斩」，直取 ${target.name}`);
-        this.strike(actor, target, { kind: 'physical', mult: 2.4, canCrit: true, label: '碎星斩' });
-        if (isAlive(target)) this.inflict(target, getStatusDef('defDown'), actor);
+        if (target) {
+          this.logIt('action', `${actor.name} 释放特技「碎星斩」，直取 ${target.name}`);
+          await this.strike(actor, target, {
+            kind: 'physical',
+            mult: 2.4,
+            canCrit: true,
+            label: '碎星斩',
+          });
+          if (isAlive(target)) await this.inflict(target, getStatusDef('defDown'), actor);
+        }
         break;
       }
 
       case 'talisman': {
-        if (!target) break;
-        this.logIt('action', `【占位】${actor.name} 祭出法宝，轰向 ${target.name}`);
-        this.strike(actor, target, { kind: 'physical', mult: 1.6, canCrit: true, label: '法宝' });
+        if (target) {
+          this.logIt('action', `【占位】${actor.name} 祭出法宝，轰向 ${target.name}`);
+          await this.strike(actor, target, {
+            kind: 'physical',
+            mult: 1.6,
+            canCrit: true,
+            label: '法宝',
+          });
+        }
         break;
       }
 
       case 'spiritTreasure': {
         this.logIt('action', `【占位】${actor.name} 祭出灵宝，灵光普照敌方全体`);
         for (const foe of foes) {
-          this.strike(actor, foe, { kind: 'magical', mult: 1.2, label: '灵宝' });
+          await this.strike(actor, foe, { kind: 'magical', mult: 1.2, label: '灵宝' });
         }
         break;
       }
@@ -344,13 +416,13 @@ export class Battle {
       case 'summon': {
         this.logIt('action', `【占位】${actor.name} 召唤灵兽助战`);
         for (const foe of foes) {
-          this.strike(actor, foe, { kind: 'magical', mult: 1.1, label: '召唤' });
+          await this.strike(actor, foe, { kind: 'magical', mult: 1.1, label: '召唤' });
         }
         break;
       }
 
       case 'capture': {
-        if (target) this.attemptCapture(actor, target);
+        if (target) await this.attemptCapture(actor, target);
         break;
       }
 
@@ -359,9 +431,15 @@ export class Battle {
       case 'flee':
         break;
     }
+
+    await this.director?.afterAction?.(actor);
   }
 
-  private strike(attacker: BattleUnit, target: BattleUnit, spec: DamageSpec): void {
+  private async strike(
+    attacker: BattleUnit,
+    target: BattleUnit,
+    spec: DamageSpec,
+  ): Promise<void> {
     if (!isAlive(target)) return;
 
     const outcome = resolveAttack(attacker, target, spec, this.rng);
@@ -375,16 +453,32 @@ export class Battle {
     if (outcome.defeated) {
       this.logIt('system', `${target.name} 倒下了`);
     }
+
+    await this.director?.onStrike?.({
+      attacker,
+      target,
+      damage: outcome.dealt,
+      healing: 0,
+      crit: outcome.crit,
+      defeated: outcome.defeated,
+      label: spec.label,
+    });
   }
 
-  private inflict(target: BattleUnit, def: StatusDef, source: BattleUnit): void {
+  private async inflict(target: BattleUnit, def: StatusDef, source: BattleUnit): Promise<void> {
     const refreshed = applyStatus(target, def, source.id);
     const verb = refreshed ? '刷新了' : def.kind === 'buff' ? '获得了' : '陷入了';
     this.logIt('status', `${target.name} ${verb}「${def.name}」—— ${def.desc}`);
+
+    await this.director?.onStatus?.({
+      unit: target,
+      name: def.name,
+      kind: def.kind,
+    });
   }
 
   /** 占位实现：按目标剩余血量判定成功率。 */
-  private attemptCapture(actor: BattleUnit, target: BattleUnit): void {
+  private async attemptCapture(actor: BattleUnit, target: BattleUnit): Promise<void> {
     const hpRatio = target.stats.hp / target.stats.maxHp;
     const chance = clamp(
       BALANCE.captureBaseChance + (1 - hpRatio) * BALANCE.captureHpWeight,
@@ -399,8 +493,19 @@ export class Battle {
     if (this.rng.chance(chance)) {
       target.captured = true;
       this.logIt('system', `捕捉成功！${target.name} 被收服，退出了战斗`);
+      await this.director?.onStatus?.({ unit: target, name: '被捕获', kind: 'debuff' });
+      await this.director?.onStrike?.({
+        attacker: actor,
+        target,
+        damage: 0,
+        healing: 0,
+        crit: false,
+        defeated: true,
+        label: '捕捉',
+      });
     } else {
       this.logIt('system', `捕捉失败，${target.name} 挣脱了`);
+      await this.director?.onStatus?.({ unit: target, name: '挣脱', kind: 'buff' });
     }
   }
 
@@ -431,10 +536,10 @@ export class Battle {
   // 阶段 6：行动结束判定
   // -------------------------------------------------------------------------
 
-  private runActionEnd(): void {
+  private async runActionEnd(): Promise<void> {
     for (const unit of this.units) {
       if (!isAlive(unit)) continue;
-      this.applyStatusTicks(unit, 'actionEnd');
+      await this.applyStatusTicks(unit, 'actionEnd');
     }
 
     for (const unit of this.units) {
@@ -447,8 +552,8 @@ export class Battle {
     }
   }
 
-  /** 结算某阶段的持续伤害/回复。纯取值之外还负责落地伤害与日志。 */
-  private applyStatusTicks(unit: BattleUnit, trigger: StatusTrigger): void {
+  /** 结算某阶段的持续伤害/回复。 */
+  private async applyStatusTicks(unit: BattleUnit, trigger: StatusTrigger): Promise<void> {
     for (const tick of collectStatusTicks(unit, trigger)) {
       if (!isAlive(unit)) break;
 
@@ -456,9 +561,29 @@ export class Battle {
         const outcome = applyDamage(unit, tick.amount);
         this.logIt('damage', `${unit.name} 受到「${tick.label}」${outcome.dealt} 点伤害`);
         if (outcome.defeated) this.logIt('system', `${unit.name} 倒下了`);
+
+        await this.director?.onStrike?.({
+          attacker: undefined,
+          target: unit,
+          damage: outcome.dealt,
+          healing: 0,
+          crit: false,
+          defeated: outcome.defeated,
+          label: tick.label,
+        });
       } else {
         const healed = healHp(unit, tick.amount);
         this.logIt('heal', `${unit.name} 因「${tick.label}」回复 ${healed} 点生命`);
+
+        await this.director?.onStrike?.({
+          attacker: undefined,
+          target: unit,
+          damage: 0,
+          healing: healed,
+          crit: false,
+          defeated: false,
+          label: tick.label,
+        });
       }
     }
   }
