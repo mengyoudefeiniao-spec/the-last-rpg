@@ -4,13 +4,49 @@
 
 ## 当前状态
 
-立项阶段：目录骨架已就位，尚未写代码与正文内容。
+**战斗系统最小可行原型已可运行**：一场 3v3 的完整回合制战斗，含 HP / MP / 愤怒（SP）三条资源、
+增益与减益状态、九个指令按钮、战斗日志与目标选择。剧本与数据层尚未开始填充。
+
+### 运行
+
+```powershell
+npm install       # 首次
+npm run dev       # 开发服务器，浏览器打开终端提示的地址
+npm test          # 跑战斗逻辑测试（Node 内置测试器，不需要浏览器）
+npm run typecheck # 类型检查
+npm run build     # 类型检查 + 生产构建到 dist/
+```
 
 ## 技术栈
 
 - 语言：TypeScript
 - 运行环境：浏览器（无后端；存档先用 `localStorage`，需要大量数据时换 `IndexedDB`）
-- 构建工具：待定（推荐 Vite），入口为根目录 `index.html` + `src/main.ts`
+- 构建工具：Vite，入口为根目录 `index.html` + `src/main.ts`
+
+源码统一使用**带 `.ts` 扩展名**的相对导入。这样同一份逻辑：浏览器里由 Vite 处理，
+`node --test` 里由 Node 内置的类型剥离直接跑 —— 无需任何额外构建步骤。
+代价是 `tsconfig.json` 必须开 `allowImportingTsExtensions`。
+
+## 战斗系统
+
+回合状态机在 `src/systems/battle/battle.ts`，一个回合依次经过：
+
+```
+turnStart → commandInput → statusSettlement → executeCommands
+          → bothSidesAction → actionEnd → （下一回合）
+```
+
+| 阶段 | 做什么 |
+| --- | --- |
+| `turnStart` | 回合数 +1、自然回复 MP/SP、结算回合开始触发的状态 |
+| `commandInput` | 暂停，等待 UI 为每个我方单位收集指令 |
+| `statusSettlement` | 判定能否行动（眩晕等）、汇总属性修正 |
+| `executeCommands` | 校验并固化指令；防御与逃跑立即生效 |
+| `bothSidesAction` | 按速度排序，敌我双方依次结算行动 |
+| `actionEnd` | 结算 DoT/HoT，状态倒计时与到期移除 |
+
+`Battle` 对 DOM 一无所知，只通过事件总线广播。浏览器里由 `BattleView` 订阅渲染，
+Node 里由 `tests/` 订阅断言 —— 同一份战斗逻辑，两个消费者。
 
 ## 四条轨道
 
@@ -44,9 +80,9 @@ tools/    开发脚本：剧本→数据导出、schema 校验、交叉引用检
 - **文档文件**：允许中文命名，方便阅读。
 - **数据文件**：文件名即 ID，如 `char.hero.json`、`quest.escape-village.json`。
 
-## 起步顺序
+## 下一步
 
-1. 确认 `node -v` / `npm -v` 正常后初始化工程（`npm init` + 装 `vite` / `typescript`）。
-2. 先写 `docs/00-总览/世界观.md` 与 `docs/10-世界/`，把术语表立起来。
-3. 人物定稿后再镜像到 `data/characters/*.json`，同时在 `data/schema/` 补字段约束。
-4. 代码从 `src/core/`（游戏循环、状态机）和 `src/data/`（加载器）开始。
+1. 先写 `docs/00-总览/世界观.md` 与 `docs/10-世界/`，把术语表立起来 —— 人物与地名定不下来，后面的数据表会一直返工。
+2. 把 `src/data/sample-battle.ts` 里的占位数值搬到 `data/characters/*.json`，并在 `data/schema/` 补字段约束，让战斗真正由 `data/` 驱动。
+3. 法宝 / 灵宝 / 召唤 / 捕捉 目前是占位实现（UI 上带「占位」标记）：资源消耗与日志齐全，效果是简化的统一逻辑。
+4. 战斗演出目前同步跑完、一次性出结果。要加逐条动画时，把 `Battle` 的阶段推进改成由 UI 逐步驱动即可，逻辑层不用动。
