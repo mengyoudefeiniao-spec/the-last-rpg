@@ -11,6 +11,7 @@ export function createUnit(init: BattleUnitInit): BattleUnit {
     side: init.side,
     stats: createStats(init.stats),
     statuses: [],
+    position: init.position ? { ...init.position } : { x: 0, z: 0 },
     isDefending: false,
     hasActed: false,
     captured: false,

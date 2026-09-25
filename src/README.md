@@ -1,33 +1,62 @@
 # src/ —— TypeScript 源码
 
-## 分层与依赖方向
+## 三层结构
 
-箭头表示「可以依赖」，反向依赖一律禁止（否则逻辑会漏进渲染层，变得无法测试）：
+代码按「谁运行它」分成三层，这直接决定了它能 import 什么：
 
 ```
-main → ui / render / input / audio → systems → core
-                        ↘ data（加载与类型）↙
-config / utils 被各层共用，自身不依赖任何人
+src/
+├─ shared/   前后端共用 —— 战斗规则、数据表、协议。不得 import DOM 或 Node API
+├─ server/   只在 Node 里跑 —— 权威状态与网络入口
+└─ client/   只在浏览器里跑 —— 渲染与交互
 ```
+
+依赖方向是单向的：`server → shared ← client`。
+shared 不知道另外两层的存在，所以同一套战斗规则既可以被服务端执行，也能被 Node 测试直接跑。
 
 ## 各目录职责
 
-- `core/`：引擎无关的骨架——游戏循环、场景与状态机、事件总线、可复现随机数、游戏内时间。
-  **不得 import DOM 或浏览器 API**，这样核心逻辑可以在 Node 里直接测。
-- `data/`：加载并校验 `data/*.json`，导出类型定义。`types.ts` 是全项目数据类型的唯一来源。
-- `systems/`：纯玩法逻辑——战斗、背包、任务、对话、成长、经济。接收状态、返回结果，不画界面。
-- `world/`：地图解析、实体与坐标、寻路与碰撞、NPC 调度、触发器。
-- `render/`：把 `world` 的状态画到 Canvas/WebGL。**只读玩法状态，不修改**。
-- `ui/`：HUD、菜单、对话框、设置面板。
-- `input/`：键盘/鼠标/触摸/手柄 → 游戏内动作的映射。
-- `audio/`：BGM/SFX 调度、音量与静音管理。
-- `save/`：存档序列化（localStorage/IndexedDB）与版本迁移。
-- `config/`：常量与平衡参数。调数值只改这里，别散落到各系统。
-- `utils/`：无状态工具函数。
+### shared/ —— 规则与数据的所在
+
+- `data/types.ts`：全项目类型的唯一来源。
+- `data/statuses.ts`：状态表（中毒、冻伤、灼地……）。**是数据，不含逻辑。**
+- `data/battlefields.ts`：战场定义 —— 阵型槽位 + 地形分区。加一个新战场只改这里。
+- `data/sample-battle.ts`：占位队伍数据，等 `docs/` 的人物定稿后由 `data/characters/*.json` 取代。
+- `config/balance.ts`：数值参数。调平衡只改这里。
+- `core/`：可复现随机数、事件总线等无副作用的小工具。
+- `systems/battle/battle.ts`：七阶段回合状态机。
+- `systems/battle/terrain.ts`：地形判定（谁站在哪个区域）。
+- `systems/battle/status-effects.ts`：状态结算逻辑（叠加、倒计时、DoT/HoT）。
+- `systems/battle/battle-unit.ts`：单位构造与伤害公式。
+- `systems/battle/commands.ts`：九种指令的定义与可用性校验。
+- `protocol.ts`：前后端契约。**改协议就是改这里**，两侧编译会同时报错。
+
+### server/ —— 权威状态
+
+- `server.ts`：WebSocket 入口。导出 `startBattleServer()`，集成测试直接把它拉起来。
+- `battle-session.ts`：一场战斗的会话，也就是这个游戏的「全局缓存」。
+
+### client/ —— 只负责表现
+
+- `net/battle-client.ts`：WebSocket 收发，不解析语义、不改状态。
+- `state/battle-mirror.ts`：服务端快照的本地只读副本。
+- `render/battle-stage.ts`：three.js 战场、地形分区、演出播放。
+- `render/animator.ts`：极简补间，带速度倍率。
+- `ui/battle-view.ts`：HUD —— 顶栏、布阵面板、指令栏、日志。
+
+## 四条不许破的边界
+
+1. **shared 不许 import client 或 server** —— 一旦破了，测试就再也跑不动了。
+2. **客户端不许推导任何战斗结果** —— 扣多少血、谁先出手、特技能不能放，
+   全由服务端算完推过来。连「指令按钮该不该置灰」都是服务端的 `commands` 字段说了算。
+3. **地形效果只在 `terrain.ts` 判定一次** —— 想加新地形只改 `data/battlefields.ts`，
+   别处一行都不用动。把地形判断散成好几处，就是扩展性 bug 的开端。
+4. **状态表在 `data/`，状态逻辑在 `systems/`** —— 数据层不该反向依赖逻辑层。
 
 ## 约定
 
 - 文件名 `kebab-case.ts`，类型与类名 `PascalCase`。
-- 新增玩法模块的顺序：先在 `systems/` 写纯逻辑 + 在 `tests/unit` 覆盖，再接 `ui/`、`render/`。
-- 不在模块顶层读写 `window`、`localStorage` 等有副作用的全局对象，统一从入口注入，便于测试与换平台。
-- 存档里只存**状态**，不存逻辑推导结果，避免版本升级后数据自相矛盾。
+- 相对导入一律**带 `.ts` 扩展名**：浏览器端交给 Vite，Node 端由内置类型剥离直接跑，
+  两端都不需要额外的构建步骤（代价是 `tsconfig.json` 要开 `allowImportingTsExtensions`）。
+- 不在模块顶层读写 `window` / `localStorage` 等有副作用的对象，统一从入口注入。
+- 演出节奏的开关只有 `render/battle-stage.ts` 顶部的 `TIMING` 一处，别散落。

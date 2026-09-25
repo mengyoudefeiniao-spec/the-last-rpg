@@ -2,38 +2,12 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 
-import type { BattleUnit, CommandId, PendingAction } from '../data/types.ts';
-import type {
-  Battle,
-  BattleDirector,
-  StatusReport,
-  StrikeReport,
-} from '../systems/battle/battle.ts';
-import { isAlive } from '../systems/battle/battle-unit.ts';
+import type { CommandId, TerrainKind } from '../../shared/data/types.ts';
+import type { BattleRecord, UnitSnapshot } from '../../shared/protocol.ts';
+import { zoneAt } from '../../shared/systems/battle/terrain.ts';
+import type { BattleMirror } from '../state/battle-mirror.ts';
 import { Animator } from './animator.ts';
 import './battle-stage.css';
-
-/**
- * 敌方站位：画面左上（-x 在左、-z 在远）。
- * 前排 3 人靠近己方、后排 2 人靠镜头，后排横向错开卡在前排的间隙里。
- * 前后排的 z 差要留够 —— 透视投影会把它们在屏幕上压扁，站太近血条就会糊成一片。
- */
-const ENEMY_SLOTS: ReadonlyArray<readonly [number, number]> = [
-  [-1.4, -3.6],
-  [-4.2, -4.4],
-  [-7.0, -5.2],
-  [-2.8, -7.4],
-  [-5.6, -8.2],
-];
-
-/** 我方站位：画面右下（+x 在右、+z 在近），与敌方镜像。 */
-const ALLY_SLOTS: ReadonlyArray<readonly [number, number]> = [
-  [1.4, 3.6],
-  [4.2, 4.4],
-  [7.0, 5.2],
-  [2.8, 7.4],
-  [5.6, 8.2],
-];
 
 /** 这几类指令是「冲上去打」，演出时会移动到目标身前。 */
 const MELEE_COMMANDS: ReadonlySet<CommandId> = new Set<CommandId>([
@@ -43,9 +17,9 @@ const MELEE_COMMANDS: ReadonlySet<CommandId> = new Set<CommandId>([
 ]);
 
 /**
- * 演出各段的时长（秒，均按 1 倍速计）。
+ * 演出各段的时长（秒，按 1 倍速计）。
  * 一次行动的完整链条 ≈ 0.08 + 0.22 + 0.12 + 0.24 + 0.18 ≈ 0.84 秒，
- * 十人一回合约 8 秒 —— 所以默认给了 2 倍速档，否则节奏会拖到让人以为卡住。
+ * 十人一回合约 8 秒 —— 所以默认给 2 倍速档，否则节奏会拖到让人以为卡住。
  */
 const TIMING = {
   turnToTarget: 0.08,
@@ -62,30 +36,44 @@ const TIMING = {
 const ALLY_COLORS = [0x64d2bf, 0x6f9ef0, 0x7fd98a, 0xbf9af0, 0xf0c063];
 const ENEMY_COLORS = [0xc75d5d, 0xb1604a, 0xa0528f, 0x8f6a4a, 0x9b5a6b];
 
+/** 地形配色 —— 与 CSS 里 .zone-label--* 的色系保持一致。 */
+const TERRAIN_COLORS: Record<TerrainKind, number> = {
+  snow: 0x7fb8e8,
+  flame: 0xe07040,
+  spring: 0x5fd8a8,
+  miasma: 0x9b6bd8,
+};
+
+/** 战争迷雾般的环境底色。 */
+const FOG_COLOR = 0x0a0f18;
+
+/** 点击拾取的语义：谁可以被点。 */
+export type PickMode = 'none' | 'enemy' | 'ally';
+
 export interface BattleStageOptions {
-  /** 需要玩家点选目标时，点中某个单位后回调它的 id。 */
   onUnitPick?: (unitId: string) => void;
 }
 
 interface UnitView {
-  unit: BattleUnit;
-  /** 位置与朝向。 */
+  id: string;
   group: THREE.Group;
-  /** 倒地用的倾斜层，独立于血条，免得血条跟着躺下。 */
+  /** 倒地倾斜层，独立于血条，免得血条跟着躺下。 */
   tilt: THREE.Group;
   bodyMaterial: THREE.MeshStandardMaterial;
+  ring: THREE.Mesh;
+  ringMaterial: THREE.MeshBasicMaterial;
+  /** 单位自身颜色 —— 离开地形后脚下光环要恢复成它。 */
+  homeRingColor: number;
+  /** 站位（会随布阵换位变化）。 */
   homePosition: THREE.Vector3;
   homeRotationY: number;
-  ring: THREE.Mesh;
   bar: {
     root: HTMLElement;
-    name: HTMLElement;
     hp: HTMLElement;
     mp: HTMLElement;
     sp: HTMLElement;
     statuses: HTMLElement;
   };
-  /** 上次同步到 DOM 的值，避免每帧写 DOM。 */
   synced: {
     hp: number;
     mp: number;
@@ -93,20 +81,24 @@ interface UnitView {
     statusKey: string;
     defending: boolean;
     down: boolean;
-    targetable: boolean;
+    active: boolean;
+    pickable: boolean;
+    zoneId: string;
   };
   fallen: boolean;
+  /** 演出中由动画接管位置，逐帧同步不得插手。 */
+  animating: boolean;
 }
 
 /**
- * 3D 战场：固定视角的立体战场 + 头顶血条 + 行动演出。
+ * 3D 战场：固定机位的立体战场 + 地形分区 + 头顶血条 + 演出播放。
  *
- * 实现 BattleDirector —— 战斗逻辑在每个动作点 await 这里，等演出播完再继续。
- * 视角规则（按需求）：commandInput 阶段可自由旋转缩放，其余阶段锁定。
+ * 它只读 BattleMirror —— 也就是服务端推来的快照，从不自己推导任何战斗结果。
+ * 服务端给的 records 是「怎么演」，mirror 是「是什么」，两者的职责在类型上就是分开的。
  */
-export class BattleStage implements BattleDirector {
+export class BattleStage {
   private readonly container: HTMLElement;
-  private readonly battle: Battle;
+  private readonly mirror: BattleMirror;
   private readonly onUnitPick: ((unitId: string) => void) | undefined;
 
   private readonly animator = new Animator();
@@ -121,23 +113,23 @@ export class BattleStage implements BattleDirector {
 
   private readonly views = new Map<string, UnitView>();
   private readonly pickables: THREE.Object3D[] = [];
+  private readonly terrainGroup = new THREE.Group();
 
   private frame = 0;
   private disposed = false;
-  private targetable = false;
+  private pickMode: PickMode = 'none';
+  private activeUnitId: string | undefined;
   private pointerDownAt: { x: number; y: number } | undefined;
   private resizeObserver: ResizeObserver | undefined;
 
-  constructor(container: HTMLElement, battle: Battle, options: BattleStageOptions = {}) {
+  constructor(container: HTMLElement, mirror: BattleMirror, options: BattleStageOptions = {}) {
     this.container = container;
-    this.battle = battle;
+    this.mirror = mirror;
     this.onUnitPick = options.onUnitPick;
 
-    const { clientWidth: width, clientHeight: height } = container;
-    const w = Math.max(1, width);
-    const h = Math.max(1, height);
+    const w = Math.max(1, container.clientWidth);
+    const h = Math.max(1, container.clientHeight);
 
-    // ---------------------------- 渲染器 ----------------------------
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(w, h);
@@ -151,7 +143,6 @@ export class BattleStage implements BattleDirector {
     this.labelRenderer.domElement.style.pointerEvents = 'none';
     container.appendChild(this.labelRenderer.domElement);
 
-    // ---------------------------- 相机 ----------------------------
     this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 240);
     // 俯角约 50°：再平就把前后排压扁，再陡就失去立体感
     this.camera.position.set(0, 19, 16);
@@ -173,9 +164,9 @@ export class BattleStage implements BattleDirector {
     this.controls.update();
 
     this.buildEnvironment();
+    this.buildTerrain();
     this.buildUnits();
 
-    // ---------------------------- 事件 ----------------------------
     this.renderer.domElement.addEventListener('pointerdown', this.handlePointerDown);
     this.renderer.domElement.addEventListener('pointerup', this.handlePointerUp);
 
@@ -186,37 +177,78 @@ export class BattleStage implements BattleDirector {
   }
 
   // ==========================================================================
-  // BattleDirector —— 演出
+  // 演出播放 —— 把服务端给的记录逐条演出来
   // ==========================================================================
 
+  /** 播放一组记录。期间 mirror.playing 为 true，UI 据此锁住输入。 */
+  async playRecords(records: readonly BattleRecord[]): Promise<void> {
+    if (records.length === 0) return;
+
+    this.mirror.playing = true;
+    try {
+      for (const record of records) {
+        await this.playRecord(record);
+      }
+    } finally {
+      this.mirror.playing = false;
+    }
+  }
+
+  private async playRecord(record: BattleRecord): Promise<void> {
+    switch (record.kind) {
+      case 'turnStart':
+        this.resetStances();
+        break;
+
+      case 'beforeAction':
+        await this.playBeforeAction(record.actorId, record.commandId, record.targetId);
+        break;
+
+      case 'strike':
+        // 先让血条跟到这条记录结算后的值，再播受击 —— 视觉与数字才是一起动的
+        this.mirror.applyRecord(record);
+        await this.playStrike(record.targetId, record.damage, record.healing, record.crit, record.defeated, record.label);
+        break;
+
+      case 'status':
+        await this.playStatus(record.unitId, record.name, record.statusKind);
+        break;
+
+      case 'afterAction':
+        await this.playAfterAction(record.actorId);
+        break;
+    }
+  }
+
   /** 回合开始：全体归位站好，清掉上一轮的姿态残留。 */
-  onTurnStart(): void {
+  private resetStances(): void {
     for (const view of this.views.values()) {
-      if (!isAlive(view.unit) || view.fallen) continue;
+      const unit = this.mirror.unitById(view.id);
+      if (!unit?.alive || view.fallen) continue;
+
       view.group.position.copy(view.homePosition);
       view.group.rotation.y = view.homeRotationY;
       view.tilt.rotation.x = 0;
     }
   }
 
-  async beforeAction(
-    actor: BattleUnit,
-    action: PendingAction,
-    target: BattleUnit | undefined,
+  private async playBeforeAction(
+    actorId: string,
+    commandId: CommandId,
+    targetId: string | null,
   ): Promise<void> {
-    const view = this.views.get(actor.id);
+    const view = this.views.get(actorId);
     if (!view) return;
 
-    const targetView = target ? this.views.get(target.id) : undefined;
+    const targetView = targetId ? this.views.get(targetId) : undefined;
+    view.animating = true;
 
-    // 转向目标
     if (targetView) {
       view.group.rotation.y = angleTo(view.group.position, targetView.group.position);
       await this.animator.wait(TIMING.turnToTarget);
     }
 
-    if (targetView && MELEE_COMMANDS.has(action.commandId)) {
-      // 近战：冲到目标身前，再挥击一下
+    if (targetView && MELEE_COMMANDS.has(commandId)) {
       const from = view.group.position.clone();
       const to = approachPoint(from, targetView.group.position);
 
@@ -226,92 +258,118 @@ export class BattleStage implements BattleDirector {
       await this.animator.tween(TIMING.swing, (t) => {
         view.tilt.rotation.x = Math.sin(t * Math.PI) * 0.28;
       });
-    } else if (action.commandId !== 'defend' && action.commandId !== 'flee') {
-      // 远程 / 群体 / 召唤：原地蓄力（微微上浮）
+    } else if (commandId !== 'defend' && commandId !== 'flee') {
       await this.animator.tween(TIMING.charge, (t) => {
         view.group.position.y = Math.sin(t * Math.PI) * 0.22;
       });
     }
   }
 
-  async onStrike(report: StrikeReport): Promise<void> {
-    const view = this.views.get(report.target.id);
+  private async playStrike(
+    targetId: string,
+    damage: number,
+    healing: number,
+    crit: boolean,
+    defeated: boolean,
+    label: string,
+  ): Promise<void> {
+    const view = this.views.get(targetId);
     if (!view) return;
 
-    if (report.damage > 0) {
+    if (damage > 0) {
       // 飘字不阻塞流程 —— 它只是视觉残留，让它自己慢慢淡出
-      void this.popText(`-${report.damage}`, view, report.crit ? 'crit' : 'damage');
+      void this.popText(`-${damage}`, view, crit ? 'crit' : 'damage');
       await this.flashHit(view);
-    } else if (report.healing > 0) {
-      void this.popText(`+${report.healing}`, view, 'heal');
-    } else if (report.label) {
-      void this.popText(report.label, view, 'info');
+    } else if (healing > 0) {
+      void this.popText(`+${healing}`, view, 'heal');
+    } else if (label) {
+      void this.popText(label, view, 'info');
     }
 
-    if (report.defeated) await this.fallDown(view);
+    if (defeated) await this.fallDown(view);
   }
 
-  async onStatus(report: StatusReport): Promise<void> {
-    const view = this.views.get(report.unit.id);
+  private async playStatus(
+    unitId: string,
+    name: string,
+    statusKind: 'buff' | 'debuff',
+  ): Promise<void> {
+    const view = this.views.get(unitId);
     if (!view) return;
 
-    void this.popText(report.name, view, report.kind === 'buff' ? 'buff' : 'debuff');
+    void this.popText(name, view, statusKind);
     await this.animator.wait(TIMING.statusBeat);
   }
 
   /** 行动结束：回到自己的站位与朝向。 */
-  async afterAction(actor: BattleUnit): Promise<void> {
-    const view = this.views.get(actor.id);
-    if (!view || view.fallen) return;
+  private async playAfterAction(actorId: string): Promise<void> {
+    const view = this.views.get(actorId);
+    if (!view) return;
 
-    const start = view.group.position.clone();
-    const fromRotation = view.group.rotation.y;
+    view.animating = true;
+    try {
+      const start = view.group.position.clone();
+      const fromRotation = view.group.rotation.y;
 
-    const needsReturn =
-      start.distanceTo(view.homePosition) > 0.02 ||
-      Math.abs(start.y) > 0.02 ||
-      Math.abs(fromRotation - view.homeRotationY) > 0.02;
+      const needsReturn =
+        Math.abs(start.x - view.homePosition.x) > 0.02 ||
+        Math.abs(start.z - view.homePosition.z) > 0.02 ||
+        Math.abs(start.y) > 0.02 ||
+        Math.abs(fromRotation - view.homeRotationY) > 0.02;
 
-    if (!needsReturn) return;
+      if (needsReturn) {
+        await this.animator.tween(TIMING.returnHome, (t) => {
+          view.group.position.set(
+            start.x + (view.homePosition.x - start.x) * t,
+            start.y + (view.homePosition.y - start.y) * t,
+            start.z + (view.homePosition.z - start.z) * t,
+          );
+          view.group.rotation.y = fromRotation + (view.homeRotationY - fromRotation) * t;
+        });
+      }
 
-    await this.animator.tween(TIMING.returnHome, (t) => {
-      view.group.position.set(
-        start.x + (view.homePosition.x - start.x) * t,
-        start.y + (view.homePosition.y - start.y) * t,
-        start.z + (view.homePosition.z - start.z) * t,
-      );
-      view.group.rotation.y = fromRotation + (view.homeRotationY - fromRotation) * t;
-    });
-
-    view.group.position.copy(view.homePosition);
-    view.group.rotation.y = view.homeRotationY;
+      view.group.position.copy(view.homePosition);
+      view.group.rotation.y = view.homeRotationY;
+      view.tilt.rotation.x = 0;
+    } finally {
+      view.animating = false;
+    }
   }
 
   // ==========================================================================
   // 对外控制
   // ==========================================================================
 
-  /** 是否允许旋转/缩放视角。按需求：只有指令阶段开放。 */
+  /** 是否允许旋转/缩放视角。按需求：布阵与指令阶段开放，行动期间锁死。 */
   setInteractive(enabled: boolean): void {
     this.controls.enabled = enabled;
     if (enabled) this.controls.update();
   }
 
-  /** 是否处于「点敌人选目标」状态。 */
-  setTargetable(enabled: boolean): void {
-    this.targetable = enabled;
+  setPickMode(mode: PickMode): void {
+    this.pickMode = mode;
   }
 
-  /** 高亮当前正在下指令的我方单位。 */
   setActiveUnit(unitId: string | undefined): void {
-    for (const [id, view] of this.views) {
-      view.bar.root.classList.toggle('is-active', id === unitId);
-    }
+    this.activeUnitId = unitId;
   }
 
   /** 演出速度倍率。1 = 常规。 */
   setSpeed(speed: number): void {
     this.animator.speed = speed;
+  }
+
+  /** 强制把所有单位摆到快照给的位置（重开一局时用，不走平滑过渡）。 */
+  syncNow(): void {
+    for (const view of this.views.values()) {
+      const unit = this.mirror.unitById(view.id);
+      if (!unit) continue;
+
+      this.applyHome(view, unit);
+      view.group.position.copy(view.homePosition);
+      view.group.rotation.y = view.homeRotationY;
+      this.resetUnitPose(view, unit);
+    }
   }
 
   dispose(): void {
@@ -342,11 +400,10 @@ export class BattleStage implements BattleDirector {
   // ==========================================================================
 
   private buildEnvironment(): void {
-    this.scene.background = new THREE.Color(0x0a0f18);
-    this.scene.fog = new THREE.Fog(0x0a0f18, 30, 62);
+    this.scene.background = new THREE.Color(FOG_COLOR);
+    this.scene.fog = new THREE.Fog(FOG_COLOR, 30, 62);
 
-    const hemi = new THREE.HemisphereLight(0x9fc4ff, 0x11161f, 1.1);
-    this.scene.add(hemi);
+    this.scene.add(new THREE.HemisphereLight(0x9fc4ff, 0x11161f, 1.1));
 
     const key = new THREE.DirectionalLight(0xffe6bd, 2.0);
     key.position.set(9, 17, 11);
@@ -360,7 +417,6 @@ export class BattleStage implements BattleDirector {
     key.shadow.bias = -0.0012;
     this.scene.add(key);
 
-    // 地面
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(64, 64),
       new THREE.MeshStandardMaterial({ color: 0x1b2533, roughness: 0.95, metalness: 0.05 }),
@@ -369,12 +425,10 @@ export class BattleStage implements BattleDirector {
     ground.receiveShadow = true;
     this.scene.add(ground);
 
-    // 网格（用暗色，只做空间参考）
     const grid = new THREE.GridHelper(64, 64, 0x2f4358, 0x1f2c3c);
     grid.position.y = 0.005;
     this.scene.add(grid);
 
-    // 两阵营的分界线，强化「敌上我下」的构图
     const divider = new THREE.Mesh(
       new THREE.PlaneGeometry(0.16, 26),
       new THREE.MeshBasicMaterial({ color: 0x3d5570, transparent: true, opacity: 0.5 }),
@@ -382,32 +436,76 @@ export class BattleStage implements BattleDirector {
     divider.rotation.x = -Math.PI / 2;
     divider.position.y = 0.01;
     this.scene.add(divider);
+
+    this.scene.add(this.terrainGroup);
+  }
+
+  /** 地形分区：半透明圆盘 + 边缘环 + 名称标签。 */
+  private buildTerrain(): void {
+    const battlefield = this.mirror.battlefield;
+    if (!battlefield) return;
+
+    for (const zone of battlefield.zones) {
+      const color = TERRAIN_COLORS[zone.kind];
+
+      const disc = new THREE.Mesh(
+        new THREE.CircleGeometry(zone.radius, 56),
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.13,
+          depthWrite: false,
+        }),
+      );
+      disc.rotation.x = -Math.PI / 2;
+      disc.position.set(zone.center.x, 0.02, zone.center.z);
+      this.terrainGroup.add(disc);
+
+      const rim = new THREE.Mesh(
+        new THREE.RingGeometry(zone.radius * 0.955, zone.radius, 72),
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.55,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        }),
+      );
+      rim.rotation.x = -Math.PI / 2;
+      rim.position.set(zone.center.x, 0.03, zone.center.z);
+      this.terrainGroup.add(rim);
+
+      const label = document.createElement('div');
+      label.className = `zone-label zone-label--${zone.kind}`;
+      label.textContent = zone.name;
+      label.title = zone.desc;
+
+      const labelObject = new CSS2DObject(label);
+      // 摆在圆的靠镜头一侧，避免压住站在圈里的单位
+      labelObject.position.set(
+        zone.center.x,
+        0.35,
+        zone.center.z + zone.radius * 0.82,
+      );
+      this.terrainGroup.add(labelObject);
+    }
   }
 
   private buildUnits(): void {
-    const allies = this.battle.units.filter((unit) => unit.side === 'ally');
-    const enemies = this.battle.units.filter((unit) => unit.side === 'enemy');
-
-    allies.forEach((unit, index) => this.createUnitView(unit, index));
-    enemies.forEach((unit, index) => this.createUnitView(unit, index));
+    for (const unit of this.mirror.units) {
+      this.createUnitView(unit);
+    }
   }
 
-  private createUnitView(unit: BattleUnit, index: number): void {
+  private createUnitView(unit: UnitSnapshot): void {
     const isAlly = unit.side === 'ally';
-    const slots = isAlly ? ALLY_SLOTS : ENEMY_SLOTS;
     const palette = isAlly ? ALLY_COLORS : ENEMY_COLORS;
-
-    const slot = slots[index % slots.length] as readonly [number, number];
+    const index = this.views.size;
     const color = palette[index % palette.length] as number;
 
     const group = new THREE.Group();
-    group.position.set(slot[0], 0, slot[1]);
+    group.position.set(unit.position.x, 0, unit.position.z);
 
-    // 朝战场中心站，敌我自然相对
-    const homeRotationY = angleTo(group.position, new THREE.Vector3(0, 0, 0));
-    group.rotation.y = homeRotationY;
-
-    // 倒地倾斜层：血条挂在 group 上而不是这里，免得血条跟着躺下
     const tilt = new THREE.Group();
     group.add(tilt);
 
@@ -432,21 +530,17 @@ export class BattleStage implements BattleDirector {
     head.castShadow = true;
     tilt.add(head);
 
-    // 脚下的站位环
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.42, 0.56, 28),
-      new THREE.MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity: 0.45,
-        side: THREE.DoubleSide,
-      }),
-    );
+    const ringMaterial = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.45,
+      side: THREE.DoubleSide,
+    });
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.56, 28), ringMaterial);
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.02;
     tilt.add(ring);
 
-    // 影子
     const shadow = new THREE.Mesh(
       new THREE.CircleGeometry(0.46, 24),
       new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.32 }),
@@ -455,7 +549,6 @@ export class BattleStage implements BattleDirector {
     shadow.position.y = 0.012;
     tilt.add(shadow);
 
-    // 拾取用的不可见碰撞体：比模型大一圈，点击更友好
     const pickBox = new THREE.Mesh(
       new THREE.CylinderGeometry(0.72, 0.72, 2.3, 10),
       new THREE.MeshBasicMaterial({ visible: false }),
@@ -465,7 +558,6 @@ export class BattleStage implements BattleDirector {
     group.add(pickBox);
     this.pickables.push(pickBox);
 
-    // 头顶血条
     const bar = document.createElement('div');
     bar.className = `unit-bar unit-bar--${unit.side}`;
     bar.innerHTML = `
@@ -480,12 +572,11 @@ export class BattleStage implements BattleDirector {
     const mpEl = bar.querySelector('.unit-bar__fill--mp');
     const spEl = bar.querySelector('.unit-bar__fill--sp');
     const statusesEl = bar.querySelector('.unit-bar__statuses');
-
     if (!nameEl || !hpEl || !mpEl || !spEl || !statusesEl) {
       throw new Error('血条 DOM 结构不完整');
     }
 
-    nameEl.textContent = unit.name;
+    (nameEl as HTMLElement).textContent = unit.name;
 
     const label = new CSS2DObject(bar);
     label.position.set(0, 2.15, 0);
@@ -493,17 +584,18 @@ export class BattleStage implements BattleDirector {
 
     this.scene.add(group);
 
-    this.views.set(unit.id, {
-      unit,
+    const view: UnitView = {
+      id: unit.id,
       group,
       tilt,
       bodyMaterial,
-      homePosition: group.position.clone(),
-      homeRotationY,
       ring,
+      ringMaterial,
+      homeRingColor: color,
+      homePosition: new THREE.Vector3(unit.position.x, 0, unit.position.z),
+      homeRotationY: 0,
       bar: {
         root: bar,
-        name: nameEl as HTMLElement,
         hp: hpEl as HTMLElement,
         mp: mpEl as HTMLElement,
         sp: spEl as HTMLElement,
@@ -516,17 +608,44 @@ export class BattleStage implements BattleDirector {
         statusKey: '',
         defending: false,
         down: false,
-        targetable: false,
+        active: false,
+        pickable: false,
+        zoneId: '',
       },
       fallen: false,
-    });
+      animating: false,
+    };
+
+    this.applyHome(view, unit);
+    group.rotation.y = view.homeRotationY;
+    this.resetUnitPose(view, unit);
+
+    this.views.set(unit.id, view);
+  }
+
+  /** 把快照里的站位写进视图的「家」坐标与朝向。 */
+  private applyHome(view: UnitView, unit: UnitSnapshot): void {
+    view.homePosition.set(unit.position.x, 0, unit.position.z);
+    view.homeRotationY = angleTo(view.homePosition, new THREE.Vector3(0, 0, 0));
+  }
+
+  /** 按快照把倒地之类的一次性姿态补齐（重连、重开时用）。 */
+  private resetUnitPose(view: UnitView, unit: UnitSnapshot): void {
+    const down = !unit.alive;
+    view.fallen = down;
+    view.tilt.rotation.x = down ? -Math.PI * 0.46 : 0;
+    view.tilt.position.y = down ? -0.34 : 0;
+    view.bodyMaterial.opacity = down ? 0.45 : 1;
+    view.bodyMaterial.transparent = down;
+    view.ring.visible = !down;
+    view.bar.root.classList.toggle('is-down', down);
+    view.synced.down = down;
   }
 
   // ==========================================================================
   // 演出细节
   // ==========================================================================
 
-  /** 受击：闪红 + 沿受击方向轻退。 */
   private async flashHit(view: UnitView): Promise<void> {
     const material = view.bodyMaterial;
     const origin = view.group.position.clone();
@@ -548,7 +667,6 @@ export class BattleStage implements BattleDirector {
     view.group.position.z = origin.z;
   }
 
-  /** 倒下：绕 X 轴躺平、下沉、变暗。 */
   private async fallDown(view: UnitView): Promise<void> {
     if (view.fallen) return;
     view.fallen = true;
@@ -561,12 +679,10 @@ export class BattleStage implements BattleDirector {
     });
 
     view.ring.visible = false;
+    view.bar.root.classList.add('is-down');
   }
 
-  /**
-   * 飘字：临时挂一个 CSS2D 元素，上浮淡出。
-   * 调用方通常不 await —— 它只影响观感，不该拖住战斗流程。
-   */
+  /** 飘字：临时挂一个 CSS2D 元素，上浮淡出。调用方通常不 await。 */
   private popText(text: string, view: UnitView, kind: string): Promise<void> {
     const element = document.createElement('div');
     element.className = `float-text float-text--${kind}`;
@@ -600,6 +716,7 @@ export class BattleStage implements BattleDirector {
     const dt = Math.min(this.clock.getDelta(), 0.06);
     this.animator.update(dt);
     this.controls.update();
+    this.syncPositions(dt);
     this.syncBars();
     this.syncRingPulse();
 
@@ -607,55 +724,115 @@ export class BattleStage implements BattleDirector {
     this.labelRenderer.render(this.scene, this.camera);
   };
 
-  /** 把单位状态同步到头顶血条。只在数值真的变了时才写 DOM。 */
+  /**
+   * 站位同步：快照里的 position 变了（布阵换位）就平滑挪过去。
+   * 演出期间不动 —— 那时候位置归动画管。
+   */
+  private syncPositions(dt: number): void {
+    const k = Math.min(1, dt * 9);
+
+    for (const view of this.views.values()) {
+      const unit = this.mirror.unitById(view.id);
+      if (!unit) continue;
+
+      this.applyHome(view, unit);
+      if (view.animating || view.fallen) continue;
+
+      const { x, z } = view.homePosition;
+      const dx = x - view.group.position.x;
+      const dz = z - view.group.position.z;
+
+      if (Math.abs(dx) < 0.004 && Math.abs(dz) < 0.004) {
+        view.group.position.x = x;
+        view.group.position.z = z;
+        continue;
+      }
+
+      view.group.position.x += dx * k;
+      view.group.position.z += dz * k;
+    }
+  }
+
+  /** 把快照同步到头顶血条。只在值真的变了时才写 DOM。 */
   private syncBars(): void {
     for (const view of this.views.values()) {
-      const { stats, statuses } = view.unit;
-      const alive = isAlive(view.unit);
+      const unit = this.mirror.unitById(view.id);
+      if (!unit) continue;
+
       const synced = view.synced;
+      const hp = this.mirror.displayHp(unit);
+      const { mp, sp, maxHp, maxMp, maxSp } = unit.stats;
 
-      if (synced.hp !== stats.hp) {
-        view.bar.hp.style.width = `${percent(stats.hp, stats.maxHp)}%`;
-        synced.hp = stats.hp;
+      if (synced.hp !== hp) {
+        view.bar.hp.style.width = `${percent(hp, maxHp)}%`;
+        synced.hp = hp;
       }
-      if (synced.mp !== stats.mp) {
-        view.bar.mp.style.width = `${percent(stats.mp, stats.maxMp)}%`;
-        synced.mp = stats.mp;
+      if (synced.mp !== mp) {
+        view.bar.mp.style.width = `${percent(mp, maxMp)}%`;
+        synced.mp = mp;
       }
-      if (synced.sp !== stats.sp) {
-        view.bar.sp.style.width = `${percent(stats.sp, stats.maxSp)}%`;
-        synced.sp = stats.sp;
+      if (synced.sp !== sp) {
+        view.bar.sp.style.width = `${percent(sp, maxSp)}%`;
+        synced.sp = sp;
       }
 
-      const statusKey = statuses.map((s) => `${s.def.id}:${s.remaining}`).join(',');
+      const statusKey = unit.statuses
+        .map((status) => `${status.id}:${status.remaining}`)
+        .join(',');
       if (synced.statusKey !== statusKey) {
         view.bar.statuses.replaceChildren(
-          ...statuses.map((status) => {
+          ...unit.statuses.map((status) => {
             const chip = document.createElement('span');
-            chip.className = `unit-bar__status unit-bar__status--${status.def.kind}`;
-            chip.textContent = `${status.def.name}${status.remaining}`;
-            chip.title = status.def.desc;
+            // 地形施加的状态用虚线框区分，免得玩家以为是被某个技能挂上的
+            chip.className = [
+              'unit-bar__status',
+              `unit-bar__status--${status.kind}`,
+              status.fromTerrain ? 'unit-bar__status--terrain' : '',
+            ]
+              .filter(Boolean)
+              .join(' ');
+            chip.textContent = `${status.name}${status.remaining}`;
+            chip.title = status.desc;
             return chip;
           }),
         );
         synced.statusKey = statusKey;
       }
 
-      if (synced.defending !== view.unit.isDefending) {
-        view.bar.root.classList.toggle('is-defending', view.unit.isDefending);
-        synced.defending = view.unit.isDefending;
+      if (synced.defending !== unit.isDefending) {
+        view.bar.root.classList.toggle('is-defending', unit.isDefending);
+        synced.defending = unit.isDefending;
       }
 
-      const down = !alive;
+      const down = !unit.alive;
       if (synced.down !== down) {
         view.bar.root.classList.toggle('is-down', down);
         synced.down = down;
       }
 
-      const targetable = this.targetable && view.unit.side === 'enemy' && alive;
-      if (synced.targetable !== targetable) {
-        view.bar.root.classList.toggle('is-targetable', targetable);
-        synced.targetable = targetable;
+      const pickable =
+        (this.pickMode === 'enemy' && unit.side === 'enemy' && unit.alive) ||
+        (this.pickMode === 'ally' && unit.side === 'ally' && unit.alive);
+      if (synced.pickable !== pickable) {
+        view.bar.root.classList.toggle('is-pickable', pickable);
+        synced.pickable = pickable;
+      }
+
+      if (synced.active !== (this.activeUnitId === unit.id)) {
+        synced.active = this.activeUnitId === unit.id;
+        view.bar.root.classList.toggle('is-active', synced.active);
+        view.ringMaterial.opacity = synced.active ? 0.95 : 0.45;
+      }
+
+      // 站在地形里的单位，脚下光环换成地形色
+      const battlefield = this.mirror.battlefield;
+      const zone = battlefield ? zoneAt(battlefield, unit.position) : undefined;
+      const zoneId = zone?.id ?? '';
+      if (synced.zoneId !== zoneId) {
+        synced.zoneId = zoneId;
+        view.ringMaterial.color.setHex(
+          zone ? (TERRAIN_COLORS[zone.kind] as number) : view.homeRingColor,
+        );
       }
     }
   }
@@ -664,16 +841,14 @@ export class BattleStage implements BattleDirector {
   private syncRingPulse(): void {
     const pulse = 0.4 + Math.sin(this.clock.elapsedTime * 1.6) * 0.12;
     for (const view of this.views.values()) {
-      if (view.fallen || !isAlive(view.unit)) continue;
-      const material = view.ring.material as THREE.MeshBasicMaterial;
-      material.opacity = pulse;
+      if (view.fallen) continue;
+      view.ringMaterial.opacity = this.activeUnitId === view.id ? 0.95 : pulse;
     }
   }
 
   private handleResize(): void {
-    const { clientWidth, clientHeight } = this.container;
-    const w = Math.max(1, clientWidth);
-    const h = Math.max(1, clientHeight);
+    const w = Math.max(1, this.container.clientWidth);
+    const h = Math.max(1, this.container.clientHeight);
 
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
@@ -689,8 +864,8 @@ export class BattleStage implements BattleDirector {
     const down = this.pointerDownAt;
     this.pointerDownAt = undefined;
 
-    if (!down || !this.targetable || !this.onUnitPick) return;
-    // 拖着转视角时不当作「点选目标」
+    if (!down || this.pickMode === 'none' || !this.onUnitPick) return;
+    // 拖着转视角时不当作「点选」
     if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > 6) return;
 
     const rect = this.renderer.domElement.getBoundingClientRect();
@@ -702,7 +877,14 @@ export class BattleStage implements BattleDirector {
 
     const hit = this.raycaster.intersectObjects(this.pickables, false)[0];
     const unitId = hit?.object.userData['unitId'];
-    if (typeof unitId === 'string') this.onUnitPick(unitId);
+    if (typeof unitId !== 'string') return;
+
+    const unit = this.mirror.unitById(unitId);
+    if (!unit?.alive) return;
+    if (this.pickMode === 'enemy' && unit.side !== 'enemy') return;
+    if (this.pickMode === 'ally' && unit.side !== 'ally') return;
+
+    this.onUnitPick(unitId);
   };
 }
 

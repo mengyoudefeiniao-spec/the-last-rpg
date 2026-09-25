@@ -3,6 +3,7 @@ import { EventBus } from '../../core/event-bus.ts';
 import { createRng, type Rng } from '../../core/rng.ts';
 import type {
   BattleEvents,
+  Battlefield,
   BattleLogEntry,
   BattleOutcome,
   BattlePhase,
@@ -16,6 +17,7 @@ import type {
   StatusDef,
   StatusTrigger,
 } from '../../data/types.ts';
+import { getStatusDef } from '../../data/statuses.ts';
 import { chooseAutoAllyAction, chooseEnemyAction } from './ai.ts';
 import {
   applyDamage,
@@ -36,8 +38,9 @@ import {
   collectStatusTicks,
   decrementDurations,
   effectiveStat,
-  getStatusDef,
+  removeStatus,
 } from './status-effects.ts';
+import { desiredTerrainEffects, isTerrainStatus, terrainSourceId } from './terrain.ts';
 
 /** 一次伤害/治疗的结果，供表现层播受击、飘字、倒地。 */
 export interface StrikeReport {
@@ -84,6 +87,11 @@ export interface BattleDirector {
 
 export interface BattleOptions {
   units: BattleUnit[];
+  /**
+   * 战场定义：阵型槽位与地形分区。
+   * 省略时用一份没有地形的空白战场 —— 单元测试与自动战斗走这条路。
+   */
+  battlefield?: Battlefield;
   /** 固定 seed 即可重放同一场战斗，便于复现 bug。 */
   seed?: number;
 }
@@ -91,13 +99,26 @@ export interface BattleOptions {
 /** 属性键的展示顺序，日志里按这个顺序列增益减益。 */
 const STAT_KEYS: readonly StatKey[] = ['atk', 'def', 'mag', 'res', 'spd'];
 
+/** 没有任何地形效果的空白战场。 */
+function emptyBattlefield(): Battlefield {
+  return {
+    id: 'empty',
+    name: '无名之地',
+    desc: '此地并无特异之处。',
+    allySlots: [],
+    enemySlots: [],
+    zones: [],
+  };
+}
+
 /**
  * 回合制战斗状态机。
  *
- * 一个回合的完整流程（与需求一一对应）：
+ * 完整流程：
  *
- *   1. turnStart        回合开始：自然回复、回合开始触发的状态结算
- *   2. commandInput     玩家选择指令（此处暂停，等待 UI 调用 submit）
+ *   0. deployment       布阵：交换站位、观察战场（只有这阶段允许调整站位）
+ *   1. turnStart        回合开始：同步地形状态、自然回复、回合开始触发的状态结算
+ *   2. commandInput     玩家选择指令（此处暂停，等待调用方 submit）
  *   3. statusSettlement 状态结算：判定能否行动、汇总属性修正
  *   4. executeCommands  执行玩家指令：校验并固化；防御/逃跑立即生效
  *   5. bothSidesAction  敌我双方行动：按速度排序依次结算
@@ -105,16 +126,20 @@ const STAT_KEYS: readonly StatKey[] = ['atk', 'def', 'mag', 'res', 'spd'];
  *   → 回到 1，直到一方全灭
  *
  * 类本身对 DOM 一无所知，只通过事件总线广播，并在挂了 director 时暂停等待演出。
+ * 地形效果只在 syncTerrainStatuses 一处判定，别处不许再写第二份判断。
  */
 export class Battle {
   readonly units: BattleUnit[];
   readonly events = new EventBus<BattleEvents>();
   readonly log: BattleLogEntry[] = [];
 
+  /** 战场：阵型槽位与地形分区。 */
+  readonly battlefield: Battlefield;
+
   /** 表现层。可以在构造之后再挂上。 */
   director: BattleDirector | undefined;
 
-  phase: BattlePhase = 'turnStart';
+  phase: BattlePhase = 'deployment';
   turn = 0;
   result: BattleResult | null = null;
 
@@ -127,7 +152,24 @@ export class Battle {
 
   constructor(options: BattleOptions) {
     this.units = options.units;
+    this.battlefield = options.battlefield ?? emptyBattlefield();
     this.rng = createRng(options.seed ?? 0x5eed);
+    this.assignInitialPositions();
+  }
+
+  /** 按战场槽位分派初始站位；槽位不够时保持原样。 */
+  private assignInitialPositions(): void {
+    const assign = (side: Side, slots: Battlefield['allySlots']): void => {
+      this.units
+        .filter((unit) => unit.side === side)
+        .forEach((unit, index) => {
+          const slot = slots[index];
+          if (slot) unit.position = { ...slot };
+        });
+    };
+
+    assign('ally', this.battlefield.allySlots);
+    assign('enemy', this.battlefield.enemySlots);
   }
 
   get finished(): boolean {
@@ -140,11 +182,64 @@ export class Battle {
     return this.survivorsOf('ally').filter((unit) => unit.isPlayerControlled);
   }
 
-  /** 开始战斗：进入第 1 回合的指令阶段。 */
-  async start(): Promise<void> {
+  /** 进入布阵阶段：此时可以交换站位、自由观察战场。 */
+  start(): void {
     if (this.turn !== 0) throw new Error('战斗已经开始，请新建实例');
+    this.enterPhase('deployment');
+    this.logIt('system', `来到「${this.battlefield.name}」—— ${this.battlefield.desc}`);
+
+    for (const zone of this.battlefield.zones) {
+      this.logIt('status', `地形「${zone.name}」：${zone.desc}`);
+    }
+    for (const unit of this.units) {
+      if (unit.side === 'ally') this.reportPosition(unit);
+    }
+
+    this.events.emit('update', undefined);
+  }
+
+  /**
+   * 布阵阶段交换两个我方单位的站位。
+   * 只有这个阶段允许、且只能在自己人之间换 —— 由服务端把关，客户端绕不过去。
+   */
+  swapPositions(unitAId: string, unitBId: string): boolean {
+    if (this.phase !== 'deployment') return false;
+    if (unitAId === unitBId) return false;
+
+    const a = this.units.find((unit) => unit.id === unitAId);
+    const b = this.units.find((unit) => unit.id === unitBId);
+    if (!a || !b) return false;
+    if (a.side !== 'ally' || b.side !== 'ally') return false;
+
+    const swapped = { ...a.position };
+    a.position = { ...b.position };
+    b.position = swapped;
+
+    this.logIt('system', `${a.name} 与 ${b.name} 交换了站位`);
+    this.reportPosition(a);
+    this.reportPosition(b);
+
+    this.events.emit('update', undefined);
+    return true;
+  }
+
+  /** 布阵完成，开打。 */
+  async beginBattle(): Promise<void> {
+    if (this.phase !== 'deployment') throw new Error('当前不在布阵阶段');
+    this.logIt('system', '布阵已定，战斗开始！');
     await this.beginTurn();
     this.events.emit('update', undefined);
+  }
+
+  /** 把某个我方单位的落点写进日志，玩家据此判断该把谁放在哪。 */
+  private reportPosition(unit: BattleUnit): void {
+    const { zone } = desiredTerrainEffects(this.battlefield, unit.position);
+    this.logIt(
+      'status',
+      zone
+        ? `${unit.name} 立于「${zone.name}」 —— ${zone.desc}`
+        : `${unit.name} 处于普通地面`,
+    );
   }
 
   /**
@@ -194,6 +289,9 @@ export class Battle {
     this.logIt('phase', `—— 第 ${this.turn} 回合 ——`);
     await this.director?.onTurnStart?.(this.turn);
 
+    // 必须早于其他回合开始效果：否则这回合刚站进冻伤区，要等下回合才生效
+    await this.syncTerrainStatuses();
+
     for (const unit of this.units) {
       if (!isAlive(unit)) continue;
 
@@ -208,6 +306,43 @@ export class Battle {
     }
 
     this.enterPhase('commandInput');
+  }
+
+  /**
+   * 地形同步：站在哪个区域就获得该区域的状态，走出去就移除。
+   *
+   * 这是「站位决定增益/减益」的唯一落点。地形效果不需要谁在下指令时特殊照顾，
+   * 只要每回合开始同步一次，剩下的全交给普通的状态结算流程 ——
+   * 想加一个新地形，只改 data/battlefields.ts，这里一行都不用动。
+   */
+  private async syncTerrainStatuses(): Promise<void> {
+    for (const unit of this.units) {
+      if (!isAlive(unit)) continue;
+
+      const { zone, statusIds } = desiredTerrainEffects(this.battlefield, unit.position);
+      const desired = new Set(statusIds);
+
+      // 1) 先清掉「已离开的区域」留下的状态
+      for (const status of [...unit.statuses]) {
+        if (!isTerrainStatus(status)) continue;
+        if (desired.has(status.def.id)) continue;
+
+        removeStatus(unit, status.def.id);
+        this.logIt('status', `${unit.name} 脱离地形影响，「${status.def.name}」消退`);
+      }
+
+      // 2) 再施加（或刷新）当前区域的状态
+      if (!zone) continue;
+
+      for (const effect of zone.effects) {
+        const already = unit.statuses.some((status) => status.def.id === effect.id);
+        applyStatus(unit, effect, terrainSourceId(zone.id));
+        if (already) continue;
+
+        this.logIt('status', `${unit.name} 受「${zone.name}」影响，获得「${effect.name}」`);
+        await this.director?.onStatus?.({ unit, name: effect.name, kind: effect.kind });
+      }
+    }
   }
 
   // -------------------------------------------------------------------------

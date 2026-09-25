@@ -1,21 +1,35 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { createRng } from '../src/core/rng.ts';
-import { createSampleBattleUnits } from '../src/data/sample-battle.ts';
-import type { BattlePhase } from '../src/data/types.ts';
-import { Battle } from '../src/systems/battle/battle.ts';
+import { createRng } from '../src/shared/core/rng.ts';
+import { getBattlefield } from '../src/shared/data/battlefields.ts';
+import { createSampleBattleUnits } from '../src/shared/data/sample-battle.ts';
+import { getStatusDef } from '../src/shared/data/statuses.ts';
+import type { BattlePhase } from '../src/shared/data/types.ts';
+import { Battle } from '../src/shared/systems/battle/battle.ts';
 import {
   createUnit,
+  isAlive,
   resolveAttack,
   type DamageSpec,
-} from '../src/systems/battle/battle-unit.ts';
-import { applyStatus, getStatusDef } from '../src/systems/battle/status-effects.ts';
+} from '../src/shared/systems/battle/battle-unit.ts';
+import { applyStatus } from '../src/shared/systems/battle/status-effects.ts';
+import { zoneAt } from '../src/shared/systems/battle/terrain.ts';
 
 const MAX_TURNS = 200;
 
+/** 不带地形的战斗 —— 测的是基本规则，别让地形效果混进来。 */
 function makeBattle(seed: number): Battle {
   return new Battle({ units: createSampleBattleUnits().map(createUnit), seed });
+}
+
+/** 指定战场的一局。 */
+function makeBattleOn(battlefieldId: string, seed: number): Battle {
+  return new Battle({
+    units: createSampleBattleUnits().map(createUnit),
+    battlefield: getBattlefield(battlefieldId),
+    seed,
+  });
 }
 
 /**
@@ -23,9 +37,10 @@ function makeBattle(seed: number): Battle {
  * 不挂 director，所以所有演出 await 都被跳过 —— 战斗瞬间跑完，这正是测试要的。
  */
 async function runToEnd(battle: Battle): Promise<Battle> {
-  await battle.start();
-  let guard = 0;
+  battle.start();
+  await battle.beginBattle();
 
+  let guard = 0;
   while (!battle.finished) {
     assert.equal(battle.phase, 'commandInput', '战斗未结束时应当停在指令阶段等待输入');
     guard += 1;
@@ -62,7 +77,8 @@ test('一个回合内的阶段顺序与设计一致', async () => {
   const phases: BattlePhase[] = [];
   battle.events.on('phase', (phase) => phases.push(phase));
 
-  await battle.start();
+  battle.start();
+  await battle.beginBattle();
   phases.length = 0; // 只关心一个完整回合的循环
 
   await battle.submit(battle.autoCommand());
@@ -92,7 +108,8 @@ test('HP / MP / SP 全程不越界', async () => {
 
 test('状态效果到期后会在行动结束判定阶段被移除', async () => {
   const battle = makeBattle(3);
-  await battle.start();
+  battle.start();
+  await battle.beginBattle();
 
   const boss = battle.units.find((unit) => unit.id === 'enemy.chieftain');
   assert.ok(boss, '找不到山魈首领');
@@ -173,7 +190,8 @@ test('逃跑成功会立即结束战斗', async () => {
 
   for (let seed = 1; seed <= 60 && !fled; seed += 1) {
     const battle = makeBattle(seed);
-    await battle.start();
+    battle.start();
+    await battle.beginBattle();
 
     const actor = battle.awaitingUnits[0];
     assert.ok(actor, '首个回合应当有可操作的我方单位');
@@ -204,19 +222,131 @@ test('挂了 director 时，演出点会被依次回调', async () => {
     },
   };
 
-  await battle.start();
+  battle.start();
+  await battle.beginBattle();
   calls.length = 0;
   await battle.submit(battle.autoCommand());
 
   assert.ok(calls.includes('turnStart'), '回合开始应当回调 onTurnStart');
-  assert.ok(
-    calls.some((call) => call.startsWith('before:')),
-    '至少应当有一次行动前摇',
-  );
+  assert.ok(calls.some((call) => call.startsWith('before:')), '至少应当有一次行动前摇');
   assert.ok(calls.includes('strike'), '行动期间应当有伤害回调');
 
   // 每个 before 都要配一个同名的 after，否则演出层会漏归位
   const befores = calls.filter((call) => call.startsWith('before:')).map((c) => c.slice(7));
   const afters = calls.filter((call) => call.startsWith('after:')).map((c) => c.slice(6));
   assert.deepEqual(afters, befores, 'beforeAction 与 afterAction 必须成对');
+});
+
+// ---------------------------------------------------------------------------
+// 布阵与地形
+// ---------------------------------------------------------------------------
+
+test('布阵阶段按战场槽位分派站位', () => {
+  const battle = makeBattleOn('snow-ridge', 1);
+  battle.start();
+
+  assert.equal(battle.phase, 'deployment', '开局应当停在布阵阶段');
+
+  const battlefield = battle.battlefield;
+  const allies = battle.units.filter((unit) => unit.side === 'ally');
+  assert.ok(battlefield.allySlots.length > 0, '战场应当定义了阵型槽位');
+  assert.equal(allies.length, battlefield.allySlots.length, '我方人数应当与槽位数一致');
+
+  for (const unit of allies) {
+    const onSomeSlot = battlefield.allySlots.some(
+      (slot) => slot.x === unit.position.x && slot.z === unit.position.z,
+    );
+    assert.ok(onSomeSlot, `${unit.name} 没有落在任何阵型槽位上`);
+  }
+});
+
+test('布阵换位真的会交换坐标，且只允许在布阵阶段', async () => {
+  const battle = makeBattleOn('snow-ridge', 2);
+  battle.start();
+
+  const battlefield = battle.battlefield;
+  const allies = battle.units.filter((unit) => unit.side === 'ally');
+
+  const insideZone = allies.find((unit) => zoneAt(battlefield, unit.position) !== undefined);
+  const outsideZone = allies.find((unit) => zoneAt(battlefield, unit.position) === undefined);
+  assert.ok(insideZone, '雪山战场应当有落在冻伤区里的槽位');
+  assert.ok(outsideZone, '雪山战场应当有落在冻伤区外的槽位');
+
+  const insideBefore = { ...insideZone.position };
+  const outsideBefore = { ...outsideZone.position };
+
+  assert.equal(battle.swapPositions(insideZone.id, outsideZone.id), true);
+  assert.deepEqual(insideZone.position, outsideBefore, '甲应当搬到乙原来的位置');
+  assert.deepEqual(outsideZone.position, insideBefore, '乙应当搬到甲原来的位置');
+
+  // 换位后：原本在圈里的人出圈，原本在圈外的人进圈
+  assert.equal(
+    zoneAt(battlefield, insideZone.position),
+    undefined,
+    '换位后原本站在冻伤区的单位应当已经离开该区域',
+  );
+  assert.ok(
+    zoneAt(battlefield, outsideZone.position) !== undefined,
+    '换位后原本在圈外的单位应当进入冻伤区',
+  );
+
+  // 开打之后就不许再挪了 —— 这条由服务端把关
+  await battle.beginBattle();
+  assert.equal(battle.swapPositions(insideZone.id, outsideZone.id), false, '战斗开始后不应还能换位');
+});
+
+test('地形状态只给站在区域内的单位', async () => {
+  const battle = makeBattleOn('snow-ridge', 5);
+  battle.start();
+  await battle.beginBattle();
+
+  let covered = 0;
+  for (const unit of battle.units) {
+    if (!isAlive(unit)) continue;
+
+    const inZone = zoneAt(battle.battlefield, unit.position) !== undefined;
+    const hasFrostbite = unit.statuses.some((status) => status.def.id === 'frostbite');
+
+    assert.equal(
+      hasFrostbite,
+      inZone,
+      `${unit.name} 的地形状态与站位不符（圈内=${inZone}，冻伤=${hasFrostbite}）`,
+    );
+    if (inZone) covered += 1;
+  }
+
+  assert.ok(covered > 0, '雪山战场上应当至少有一个单位站在冻伤区里');
+});
+
+test('走出地形区域后，地形状态会在下一回合被清除', async () => {
+  const battle = makeBattleOn('snow-ridge', 5);
+  battle.start();
+  await battle.beginBattle();
+
+  const target = battle.units.find(
+    (unit) => unit.side === 'ally' && zoneAt(battle.battlefield, unit.position) !== undefined,
+  );
+  assert.ok(target, '找不到站在冻伤区里的我方单位');
+  assert.ok(
+    target.statuses.some((status) => status.def.id === 'frostbite'),
+    '站在冻伤区里却没有获得冻伤',
+  );
+
+  // 直接改坐标来模拟「因故离开区域」：正式玩法里只有布阵能换位，
+  // 这里测的是同步逻辑本身 —— 它不该依赖换位这条路径。
+  target.position = { x: 0, z: 0 };
+  await battle.submit(battle.autoCommand());
+
+  assert.ok(
+    !target.statuses.some((status) => status.def.id === 'frostbite'),
+    '离开区域后冻伤应当消退',
+  );
+});
+
+test('三个战场都能打完一整场', async () => {
+  for (const id of ['snow-ridge', 'flame-rift', 'immortal-spring']) {
+    const battle = await runToEnd(makeBattleOn(id, 9));
+    assert.ok(battle.result, `战场 ${id} 没能分出胜负`);
+    assert.ok((battle.result?.turns ?? 0) >= 2, `战场 ${id} 的回合数不合理`);
+  }
 });

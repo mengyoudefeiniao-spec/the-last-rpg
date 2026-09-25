@@ -76,10 +76,19 @@ body {
   font-size: 13px;
 }
 
-.game__camera-hint {
-  color: #6f8098;
-  font-size: 12px;
+.game__battlefield {
+  color: #9fb4d0;
+  font-size: 12.5px;
 }
+
+.game__connection {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.game__connection--open { color: #6fd3a0; }
+.game__connection--connecting { color: #ffcf6b; }
+.game__connection--closed { color: var(--enemy); }
 
 .game__speed {
   display: flex;
@@ -190,13 +199,14 @@ body {
 .log__line--status { color: #c9a4ff; }
 .log__line--resource { color: var(--text-dim); }
 
-/* ------------------------------ 底部指令 ------------------------------ */
+/* ============================== 底部区域 ============================== */
 
 .game__footer {
   grid-area: footer;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-height: 0;
 }
 
 .game__hint {
@@ -223,6 +233,11 @@ body {
   font-weight: 700;
 }
 
+.hint--error {
+  color: #ff9a92;
+  font-weight: 600;
+}
+
 .hint__cancel {
   margin-left: auto;
   padding: 4px 12px;
@@ -240,11 +255,23 @@ body {
   color: var(--enemy);
 }
 
-.game__commands {
+/* ---- 底部面板：指令栏 或 布阵面板，二选一 ---- */
+
+.game__panel {
   display: grid;
-  grid-template-columns: repeat(9, minmax(0, 1fr));
   gap: 6px;
 }
+
+.game__panel--commands {
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+}
+
+.game__panel--deploy {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+/* ------------------------------- 指令 ------------------------------- */
 
 .cmd {
   display: flex;
@@ -306,6 +333,100 @@ body {
   white-space: nowrap;
 }
 
+/* ------------------------------ 布阵面板 ------------------------------ */
+
+.deploy {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.deploy__units {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.unit-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 12px;
+  color: var(--text);
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.unit-chip:hover {
+  border-color: var(--ally);
+}
+
+.unit-chip.is-selected {
+  border-color: #ffd479;
+  box-shadow: 0 0 0 1px #ffd479 inset, 0 0 12px rgba(255, 212, 121, 0.4);
+}
+
+.unit-chip__name {
+  font-weight: 600;
+}
+
+.unit-chip__zone {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.unit-chip__zone--snow { color: #a8d8ff; }
+.unit-chip__zone--flame { color: #ffb08a; }
+.unit-chip__zone--spring { color: #8ef0c8; }
+.unit-chip__zone--miasma { color: #c9a4f0; }
+
+.deploy__start {
+  padding: 8px 22px;
+  color: #0b1018;
+  background: linear-gradient(180deg, #ffd479, #e0a030);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.deploy__start:hover {
+  filter: brightness(1.08);
+}
+
+.deploy__zones {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  margin: 0;
+  padding: 0 4px;
+  list-style: none;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.deploy__zone b {
+  color: var(--text);
+}
+
+.deploy__zone--snow b { color: #a8d8ff; }
+.deploy__zone--flame b { color: #ffb08a; }
+.deploy__zone--spring b { color: #8ef0c8; }
+.deploy__zone--miasma b { color: #c9a4f0; }
+
 /* ------------------------------- 窄屏 ------------------------------- */
 
 @media (max-width: 980px) {
@@ -333,7 +454,11 @@ body {
     max-height: 220px;
   }
 
-  .game__commands {
+  .game__panel--commands {
     grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  }
+
+  .deploy {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

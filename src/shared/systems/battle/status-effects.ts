@@ -8,120 +8,9 @@ import type {
 } from '../../data/types.ts';
 
 /**
- * 状态效果库。
- * 约定：同名状态只存在一份，再次施加是「刷新持续时间」而不是叠加 —— 避免数值滚雪球。
+ * 状态效果的运行时逻辑。
+ * 状态表本身（有哪些状态、数值多少）在 data/statuses.ts —— 那是数据，这里是逻辑。
  */
-const STATUS_DEFS = {
-  // ---------- 减益 ----------
-  poison: {
-    id: 'poison',
-    name: '中毒',
-    kind: 'debuff',
-    duration: 3,
-    dot: { label: '中毒', power: 0.06, mode: 'percentMaxHp' },
-    trigger: 'actionEnd',
-    desc: '每回合结束损失 6% 最大生命',
-  },
-  burn: {
-    id: 'burn',
-    name: '灼烧',
-    kind: 'debuff',
-    duration: 2,
-    dot: { label: '灼烧', power: 22, mode: 'flat' },
-    trigger: 'actionEnd',
-    desc: '每回合结束受到固定火焰伤害',
-  },
-  defDown: {
-    id: 'defDown',
-    name: '破甲',
-    kind: 'debuff',
-    duration: 3,
-    modifiers: { def: -0.3 },
-    trigger: 'turnStart',
-    desc: '防御力 -30%',
-  },
-  spdDown: {
-    id: 'spdDown',
-    name: '迟滞',
-    kind: 'debuff',
-    duration: 2,
-    modifiers: { spd: -0.3 },
-    trigger: 'turnStart',
-    desc: '速度 -30%',
-  },
-  stun: {
-    id: 'stun',
-    name: '眩晕',
-    kind: 'debuff',
-    duration: 1,
-    skipAction: true,
-    trigger: 'turnStart',
-    desc: '本回合无法行动',
-  },
-
-  // ---------- 增益 ----------
-  atkUp: {
-    id: 'atkUp',
-    name: '攻击强化',
-    kind: 'buff',
-    duration: 3,
-    modifiers: { atk: 0.3 },
-    trigger: 'turnStart',
-    desc: '攻击力 +30%',
-  },
-  defUp: {
-    id: 'defUp',
-    name: '铁壁',
-    kind: 'buff',
-    duration: 3,
-    modifiers: { def: 0.5 },
-    trigger: 'turnStart',
-    desc: '防御力 +50%',
-  },
-  magUp: {
-    id: 'magUp',
-    name: '法力涌动',
-    kind: 'buff',
-    duration: 3,
-    modifiers: { mag: 0.35 },
-    trigger: 'turnStart',
-    desc: '法术强度 +35%',
-  },
-  spdUp: {
-    id: 'spdUp',
-    name: '疾风',
-    kind: 'buff',
-    duration: 3,
-    modifiers: { spd: 0.4 },
-    trigger: 'turnStart',
-    desc: '速度 +40%',
-  },
-  regen: {
-    id: 'regen',
-    name: '回春',
-    kind: 'buff',
-    duration: 3,
-    hot: { label: '回春', power: 0.08, mode: 'percentMaxHp' },
-    trigger: 'actionEnd',
-    desc: '每回合结束回复 8% 最大生命',
-  },
-  rage: {
-    id: 'rage',
-    name: '狂怒',
-    kind: 'buff',
-    duration: 3,
-    modifiers: { atk: 0.2 },
-    spGainBonus: 0.5,
-    trigger: 'turnStart',
-    desc: '攻击力 +20%，受击时愤怒获取 +50%',
-  },
-} satisfies Record<string, StatusDef>;
-
-export type StatusId = keyof typeof STATUS_DEFS;
-
-export function getStatusDef(id: StatusId): StatusDef {
-  return STATUS_DEFS[id];
-}
 
 /**
  * 属性修正后的有效值。
@@ -152,6 +41,13 @@ export function applyStatus(
   }
   unit.statuses.push({ uid: `${unit.id}::${def.id}`, def, remaining, sourceId });
   return false;
+}
+
+/** 移除指定状态。返回是否真的移除掉了。 */
+export function removeStatus(unit: BattleUnit, statusId: string): boolean {
+  const before = unit.statuses.length;
+  unit.statuses = unit.statuses.filter((status) => status.def.id !== statusId);
+  return unit.statuses.length !== before;
 }
 
 /** 该单位是否被状态禁止行动。返回罪魁祸首，便于记日志。 */

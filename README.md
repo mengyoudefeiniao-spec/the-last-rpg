@@ -4,74 +4,99 @@
 
 ## 当前状态
 
-**可运行的战斗原型**：5v5 的完整回合制战斗 —— 3D 战场（three.js）+ 头顶血条 + 底部指令栏 + 战斗日志。
-含 HP / MP / 愤怒（SP）三条资源、增益与减益状态、九个指令、逐动作演出与视角控制。
+**服务端权威的战斗原型**：5v5 回合制战斗，3D 战场 + 地形分区 + 布阵阶段。
+
+- 服务端（Node + WebSocket）持有全部权威状态，客户端只负责渲染与输入
+- 开战前有**布阵阶段**，可调整我方站位
+- 战场地面划分**地形分区**，站位决定吃到什么增益/减益（雪山冻伤、炎域灼地、灵泉回血、浊气降攻）
+- 一套战斗规则同时服务浏览器与测试 —— 同一份代码，两端直接跑
+
 剧本与数据层尚未开始填充。
 
 ### 运行
 
 ```powershell
 npm install       # 首次
-npm run dev       # 开发服务器，浏览器打开终端提示的地址
-npm test          # 跑战斗逻辑测试（Node 内置测试器，不需要浏览器）
-npm run typecheck # 类型检查
-npm run build     # 类型检查 + 生产构建到 dist/
+npm run dev       # 同时拉起前端(Vite)与战斗服(Node)，终端会打印两个地址
+npm test          # 全部测试：战斗规则 + 服务端 WebSocket 集成
+npm run typecheck
+npm run build     # 类型检查 + 前端生产构建到 dist/
 ```
 
-## 技术栈
+也可以分开起：`npm run dev:client`（前端）与 `npm run server`（战斗服，默认 `ws://127.0.0.1:8787`）。
 
-- 语言：TypeScript
-- 运行环境：浏览器（无后端；存档先用 `localStorage`，需要大量数据时换 `IndexedDB`）
-- 构建工具：Vite，入口为根目录 `index.html` + `src/main.ts`
-- 3D：three.js（战场与角色，都在 `src/render/`）
+## 架构：服务端权威
 
-源码统一使用**带 `.ts` 扩展名**的相对导入。这样同一份逻辑：浏览器里由 Vite 处理，
-`node --test` 里由 Node 内置的类型剥离直接跑 —— 无需任何额外构建步骤。
-代价是 `tsconfig.json` 必须开 `allowImportingTsExtensions`。
+```
+浏览器                                战斗服 (Node)
+  ui / render                          battle-session.ts
+      ↑  snapshot（权威状态）                  ↕
+      └─ state/battle-mirror.ts  ←──────→   Battle（回合状态机）
+      └─ intent（下指令 / 换位 / 开战） ──→
+```
+
+客户端**不做任何战斗推导**：扣多少血、谁先出手、特技能不能放，
+全由服务端算完推过来；连「指令按钮该不该置灰」都是快照里的 `commands` 字段说了算。
+
+战斗逻辑本身不感知网络 —— 它只认识一个 `BattleDirector` 接口。服务端挂的是**事件记录器**
+（一次跑完整个回合，产出一份可供客户端播放的剧本），测试则干脆不挂（所有 await 直接跳过，
+战斗瞬间跑完）。同一份 `Battle`，两个消费者。
+
+`src/` 分三层，依赖单向 `server → shared ← client`。四条不许破的边界见 `src/README.md`。
 
 ## 战斗系统
 
-回合状态机在 `src/systems/battle/battle.ts`，一个回合依次经过：
+回合状态机在 `src/shared/systems/battle/battle.ts`：
 
 ```
-turnStart → commandInput → statusSettlement → executeCommands
-          → bothSidesAction → actionEnd → （下一回合）
+deployment → turnStart → commandInput → statusSettlement → executeCommands
+           → bothSidesAction → actionEnd → （下一回合）
 ```
 
 | 阶段 | 做什么 |
 | --- | --- |
-| `turnStart` | 回合数 +1、自然回复 MP/SP、结算回合开始触发的状态 |
-| `commandInput` | 暂停，等待 UI 为每个我方单位收集指令 |
+| `deployment` | 布阵：交换我方站位、观察战场。**只有这阶段能调整站位** |
+| `turnStart` | 同步地形状态、回合数 +1、自然回复 MP/SP、结算回合开始触发的状态 |
+| `commandInput` | 暂停，等待客户端提交指令 |
 | `statusSettlement` | 判定能否行动（眩晕等）、汇总属性修正 |
 | `executeCommands` | 校验并固化指令；防御与逃跑立即生效 |
 | `bothSidesAction` | 按速度排序，敌我双方依次结算行动 |
 | `actionEnd` | 结算 DoT/HoT，状态倒计时与到期移除 |
 
-`Battle` 对 DOM 一无所知，只通过事件总线广播；事件由 `BattleView`（HUD）与
-`BattleStage`（3D 战场）订阅，Node 里则由 `tests/` 订阅断言 —— 同一份战斗逻辑，多个消费者。
+## 布阵与地形
+
+**布阵**：开战前点两个我方角色即可交换站位。服务端会校验阶段与归属（只能自己人、只能在布阵阶段），
+客户端绕不过去 —— 这是后面阵法系统的立足点。
+
+**地形**：战场定义在 `src/shared/data/battlefields.ts`。地面划分若干圆形分区，每个分区带一组状态；
+单位站在圈内就获得这些状态，走出去自动移除（每回合开始同步一次）。
+
+| 战场 | 分区 | 效果 |
+| --- | --- | --- |
+| 雪山·寒鸦岭 | 冰封溪谷 / 霜牙崖 | **冻伤**：速度 -25%，每回合结束损失 4% 最大生命 |
+| 炎域·地火裂口 | 地火裂缝 / 熔岩口 | **灼地**：法抗 -20%，每回合结束损失 5% 最大生命 |
+| 仙源之地·灵泉 | 灵泉 / 浊气洼地 | **仙源滋养**：法抗 +20%，每回合回复 6% 最大生命；**浊气**：攻击与法强 -20% |
+
+关键在于这些分区**只盖住部分槽位**，所以布阵时必须取舍。
+想加一个新地形，只改 `battlefields.ts` 就够了 —— 判定逻辑一行都不用动。
 
 ## 3D 战场与演出
 
-战场在 `src/render/battle-stage.ts`：固定机位的立体战场，敌方 5 个单位在画面**左上**、
-我方 5 个在**右下**，头顶挂 `CSS2DRenderer` 投影的血条（纯 DOM，所以样式可以复用 CSS）。
+战场在 `src/client/render/battle-stage.ts`：敌方 5 个单位在画面**左上**、我方 5 个在**右下**，
+头顶挂 `CSS2DRenderer` 投影的血条（纯 DOM，样式复用 CSS）。地形分区画成半透明圆盘与边缘环。
 
-**视角规则**：只有指令阶段（`commandInput`）能拖动旋转、滚轮缩放，其余阶段一律锁定，
-免得演到一半视角乱转。方位角与俯仰角都做了限位，防止转到敌我背后让「敌上我下」的构图失去意义。
+**视角规则**：只有布阵与指令阶段能拖动旋转、滚轮缩放，行动期间一律锁定 —— 免得演到一半视角乱转。
+方位角与俯仰角都做了限位，防止转到敌我背后让「敌上我下」的构图失去意义。
 
-**演出**走依赖倒置：`Battle` 定义 `BattleDirector` 接口（`onTurnStart` / `beforeAction` /
-`onStrike` / `onStatus` / `afterAction`），在每个动作点 `await` 表现层。
-`BattleStage` 实现它（前冲、挥击、受击闪红后退、飘伤害数字、倒下躺平）；
-测试不挂 director，所有 await 直接跳过 —— 战斗瞬间跑完，这正是测试要的。
-
-演出速度在顶栏可调（慢 / 常规 / 快 / 极快）。**默认「快」（2 倍速）**：十人一回合在 1 倍速下要 8 秒，
-实测下来容易让人以为卡住了。
+**演出速度**在顶栏可调（慢 / 常规 / 快 / 极快）。**默认「快」（2 倍速）**：
+十人一回合在 1 倍速下要 8 秒，实测下来容易让人以为卡住了。
 
 ## 四条轨道
 
 | 轨道 | 目录 | 读者 | 内容 |
 | --- | --- | --- | --- |
 | 创作 | `docs/` | 人 | 世界背景、人物设定、剧情、玩法设计 |
-| 数据 | `data/` | 程序 | 游戏运行时读取的 JSON |
+| 数据 | `data/` | 程序 | 游戏运行时读取的 JSON（**尚未启用**，目前数据内联在 `src/shared/data/`） |
 | 实现 | `src/` | 程序 | TypeScript 源码 |
 | 素材 | `public/` | 程序 | 图片、音频、字体等静态资源 |
 
@@ -82,11 +107,11 @@ turnStart → commandInput → statusSettlement → executeCommands
 
 ```
 docs/     剧本与设计文档（世界/人物/剧情/玩法）
-data/     游戏运行数据（JSON，按实体一分一档）
-src/      源码（core → systems → render/ui 单向依赖）
+data/     游戏运行数据（JSON，按实体一分一档）—— 尚未启用
+src/      源码：shared（前后端共用）/ server（权威状态）/ client（表现）
 public/   静态资源（构建时原样拷贝）
-tests/    单元测试、集成测试、测试数据
-tools/    开发脚本：剧本→数据导出、schema 校验、交叉引用检查
+tests/    战斗规则测试 + 服务端 WebSocket 集成测试
+tools/    开发脚本（dev.mjs 同时拉起前后端）
 ```
 
 详见 `docs/README.md`、`data/README.md`、`src/README.md`。
@@ -101,6 +126,7 @@ tools/    开发脚本：剧本→数据导出、schema 校验、交叉引用检
 ## 下一步
 
 1. 先写 `docs/00-总览/世界观.md` 与 `docs/10-世界/`，把术语表立起来 —— 人物与地名定不下来，后面的数据表会一直返工。
-2. 把 `src/data/sample-battle.ts` 里的占位数值搬到 `data/characters/*.json`，并在 `data/schema/` 补字段约束，让战斗真正由 `data/` 驱动。
+2. 把 `src/shared/data/sample-battle.ts` 的队伍数值搬到 `data/characters/*.json`、`battlefields.ts` 的战场搬到 `data/battlefields/*.json`，让数据真正由 `data/` 驱动。
 3. 法宝 / 灵宝 / 召唤 / 捕捉 仍是占位实现（UI 上带「占位」标记）：资源消耗与日志齐全，效果是简化的统一逻辑。
-4. 角色目前是胶囊 + 球的几何体占位。接真模型时替换 `battle-stage.ts` 里 `createUnitView` 的建模部分即可，演出逻辑不用动。
+4. 布阵目前只能两两交换。要做阵法系统的话，下一步是给槽位加「阵位」语义（前排 / 后排 / 阵眼），再让地形与阵位共同决定效果。
+5. 角色是胶囊 + 球的几何体占位。接真模型时替换 `battle-stage.ts` 里 `createUnitView` 的建模部分即可，演出逻辑不用动。

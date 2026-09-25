@@ -7,6 +7,15 @@
 export type Side = 'ally' | 'enemy';
 
 /**
+ * 战场地面坐标。x 向右、z 朝镜头（近处）——
+ * 与 three.js 场景坐标一致，渲染层可以直接拿去用，不需要再换算。
+ */
+export interface BattlePosition {
+  x: number;
+  z: number;
+}
+
+/**
  * 可被状态效果修正的属性。
  * 注意不含 maxHp/maxMp/maxSp —— 改上限要同步当前值，原型阶段不做这件事。
  */
@@ -44,7 +53,7 @@ export interface StatusDef {
   id: string;
   name: string;
   kind: 'buff' | 'debuff';
-  /** 初始持续回合数。 */
+  /** 初始持续回合数。由地形施加的状态会每回合被刷新，不靠倒计时结束。 */
   duration: number;
   /** 属性倍率修正：{ atk: 0.3 } 表示攻击力 +30%。 */
   modifiers?: Partial<Record<StatKey, number>>;
@@ -68,6 +77,7 @@ export interface ActiveStatus {
   def: StatusDef;
   /** 剩余回合数，在「行动结束判定阶段」递减。 */
   remaining: number;
+  /** 来源标识。地形施加的状态以 `terrain:` 开头，离开区域时据此移除。 */
   sourceId: string;
 }
 
@@ -85,6 +95,8 @@ export interface BattleUnitInit {
   stats: Partial<Stats> & Pick<Stats, 'maxHp' | 'maxMp' | 'maxSp'>;
   /** 开场自带的状态。 */
   statuses?: StatusDef[];
+  /** 初始站位。服务端布阵时会按战场槽位分配或改写它。 */
+  position?: BattlePosition;
 }
 
 /** 战斗单位，我方与敌方共用同一结构。 */
@@ -94,6 +106,8 @@ export interface BattleUnit {
   side: Side;
   stats: Stats;
   statuses: ActiveStatus[];
+  /** 战场站位。地形效果按它判定（见 systems/battle/terrain.ts）。 */
+  position: BattlePosition;
   /** 本回合是否处于防御姿态，行动结束后解除。 */
   isDefending: boolean;
   /** 本回合是否已行动过。 */
@@ -102,6 +116,38 @@ export interface BattleUnit {
   captured: boolean;
   /** 原型阶段敌人是简单 AI，我方由玩家下达指令。 */
   isPlayerControlled: boolean;
+}
+
+/** 地形分区的视觉/语义类别，渲染层据此上色。 */
+export type TerrainKind = 'snow' | 'flame' | 'spring' | 'miasma';
+
+/**
+ * 战场上的地形分区。
+ *
+ * 圆形区域：单位站在圈内就被施加 effects 里的状态，走出去自动移除。
+ * 这是「站位决定吃到什么增益/减益」的全部实现基础 —— 没有别的地方硬编码地形效果。
+ */
+export interface TerrainZone {
+  id: string;
+  name: string;
+  kind: TerrainKind;
+  center: BattlePosition;
+  radius: number;
+  /** 站在圈内时获得的状态；离开区域由 terrain 同步逻辑移除。 */
+  effects: StatusDef[];
+  desc: string;
+}
+
+/** 一份战场定义：双方阵型槽位 + 地形分区。 */
+export interface Battlefield {
+  id: string;
+  name: string;
+  desc: string;
+  /** 我方阵型槽位。布阵阶段在这些槽位之间交换站位。 */
+  allySlots: BattlePosition[];
+  /** 敌方阵型槽位。 */
+  enemySlots: BattlePosition[];
+  zones: TerrainZone[];
 }
 
 /** 九种战斗指令。 */
@@ -145,10 +191,12 @@ export interface PendingAction {
 
 /**
  * 战斗状态机的阶段。
- * 顺序：turnStart → commandInput → statusSettlement → executeCommands
+ * 顺序：deployment → turnStart → commandInput → statusSettlement → executeCommands
  *      → bothSidesAction → actionEnd → 下一回合。
  */
 export type BattlePhase =
+  /** 布阵：只有这阶段能调整站位，也允许自由观察战场。 */
+  | 'deployment'
   | 'turnStart'
   | 'commandInput'
   | 'statusSettlement'
