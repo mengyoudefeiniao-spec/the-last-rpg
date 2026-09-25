@@ -72,4 +72,3 @@ shared 不知道另外两层的存在，所以同一套战斗规则既可以被�
 - 不在模块顶层读写 `window` / `localStorage` 等有副作用的对象，统一从入口注入。
 - 演出节奏的开关只有 `render/battle-stage.ts` 顶部的 `TIMING` 一处，别散落。
 - 集成测试必须把 `PARTY_CONFIG_PATH` 指向临时文件 —— 别改开发者本地的队伍配置。
-- 集成测试的客户端要回 `playbackDone`，否则服务端会停在「等演出」上不再推进。

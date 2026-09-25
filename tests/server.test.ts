@@ -53,13 +53,6 @@ class TestClient {
 
     socket.addEventListener('message', (event) => {
       const message = JSON.parse(String(event.data)) as ServerMessage;
-
-      // 扮演一个正常的客户端：收到演出剧本就播完并确认。
-      // 不确认的话，服务端会一直停在「等演出」上 —— 行动条也不再推进。
-      if (message.type === 'snapshot' && message.records.length > 0) {
-        socket.send(JSON.stringify({ type: 'playbackDone' }));
-      }
-
       const waiter = client.waiters.shift();
       if (waiter) waiter(message);
       else client.queue.push(message);
@@ -364,6 +357,38 @@ test('重开一局会换一个新的 sessionId', async () => {
       assert.notEqual(first.snapshot.sessionId, second.snapshot.sessionId);
       assert.equal(second.snapshot.phase, 'deployment');
       assert.equal(second.snapshot.round, 0);
+    } finally {
+      client.close();
+    }
+  });
+});
+
+test('演出播放期间行动条照常推进 —— 服务端不等客户端确认', async () => {
+  await withServer(async (url) => {
+    const client = await TestClient.connect(url);
+    try {
+      client.send({ type: 'join' });
+      await client.nextSnapshot();
+
+      client.send({ type: 'beginBattle' });
+      await client.nextSnapshot();
+
+      const awaiting = await client.waitForReadyUnit();
+      assert.ok(awaiting.length > 0, '应当有人能行动');
+
+      // 关键：从这一刻起**一个消息都不发**。
+      // 如果服务端在等「客户端播完演出」的确认，这里就再也收不到东西了 —— 行动条会僵住。
+      const received: string[] = [];
+      const startAt = Date.now();
+      while (Date.now() - startAt < 2000 && received.length < 6) {
+        const message = await client.next();
+        received.push(message.type);
+      }
+
+      assert.ok(
+        received.length >= 4,
+        `静等 2 秒只收到 ${received.length} 条消息（${received.join(',')}）—— 服务端在等确认，行动条被卡住了`,
+      );
     } finally {
       client.close();
     }

@@ -85,13 +85,12 @@ async function handleMessage(message: ServerMessage): Promise<void> {
     return;
   }
 
-  // 先在「旧状态」下把演出播完，再对齐权威快照 —— 血条才会跟着动作走，而不是先跳到位
+  // 先在「旧状态」下把演出播完，再对齐权威快照 —— 血条才会跟着动作走，而不是先跳到位。
+  // 注意：服务端**不会**等我们播完，行动条在演出期间照常推进，
+  // 所以这里偶尔会积压一两条快照，这是正常的。
   await stage.playRecords(records);
   mirror.applySnapshot(snapshot);
   view.refresh();
-
-  // 播完了要告诉服务端 —— 在那之前行动条是停着的
-  if (records.length > 0) client.send({ type: 'playbackDone' });
 }
 
 client.connect();

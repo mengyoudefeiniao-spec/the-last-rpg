@@ -176,8 +176,6 @@ export type ClientMessage =
   | { type: 'act'; unitId: string; action: PendingAction }
   /** 手动触发一个剧情事件（目前只有天雷，用于验证事件链路）。 */
   | { type: 'triggerEvent'; eventId: string }
-  /** 演出播完了 —— 服务端收到这条才恢复行动条推进。 */
-  | { type: 'playbackDone' }
   /** 重开一局（沿用当前配置）。 */
   | { type: 'restart'; seed?: number };
 

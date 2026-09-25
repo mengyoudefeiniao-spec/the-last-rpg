@@ -87,12 +87,14 @@ export class BattleMirror {
 
   /**
    * 显示用的行动值：两次心跳之间按速度插值补平，条才走得顺。
-   * 演出期间不推进 —— 服务端那时也停着。
+   *
+   * 注意**演出期间也照常插值** —— 行动条本就该在别人动手时继续走，
+   * 那种「画面在演、条还在涨」的压迫感正是 ATB 的核心。
    */
   displayGauge(unit: UnitSnapshot): number {
     const base = this.gaugeBase.get(unit.id);
     if (!base) return unit.gauge;
-    if (this.playing || unit.awaitingCommand) return base.value;
+    if (unit.awaitingCommand) return base.value;
 
     const elapsed = (performance.now() - base.at) / 1000;
     return Math.min(BALANCE.gaugeMax, base.value + unit.gaugePerSecond * elapsed);
