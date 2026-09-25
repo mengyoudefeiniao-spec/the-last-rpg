@@ -3,21 +3,31 @@ import type {
   BattleLogEntry,
   BattlePhase,
   BattleResult,
+  Formation,
 } from '../../shared/data/types.ts';
-import type { BattleRecord, BattleSnapshot, UnitSnapshot } from '../../shared/protocol.ts';
+import type {
+  BattleRecord,
+  BattleSnapshot,
+  Scenery,
+  UnitSnapshot,
+} from '../../shared/protocol.ts';
 
 /**
  * 客户端状态镜像。
  *
  * 它是服务端快照的**本地只读副本** —— 存在的唯一理由是渲染层需要一个同步、可反复读取的数据源。
  * 注意边界：这里没有任何战斗推导。血少了多少、谁先出手，全由服务端算完推过来，
- * 客户端连"这条命该扣几点"这种判断都不做。
+ * 客户端连「这条命该扣几点」这种判断都不做。
  */
 export class BattleMirror {
   sessionId = '';
   phase: BattlePhase = 'deployment';
   turn = 0;
   battlefield: Battlefield | null = null;
+  /** 我方阵法 —— 阵位与阵图连线都从这里读。 */
+  formation: Formation | null = null;
+  /** 场景外观。服务端下发的完整数据，客户端不查表。 */
+  scenery: Scenery | null = null;
   units: UnitSnapshot[] = [];
   awaitingUnitIds: string[] = [];
   log: BattleLogEntry[] = [];
@@ -38,6 +48,8 @@ export class BattleMirror {
     this.phase = snapshot.phase;
     this.turn = snapshot.turn;
     this.battlefield = snapshot.battlefield;
+    this.formation = snapshot.formation;
+    this.scenery = snapshot.scenery;
     this.units = snapshot.units;
     this.awaitingUnitIds = snapshot.awaitingUnitIds;
     this.log = snapshot.log;
@@ -79,11 +91,5 @@ export class BattleMirror {
     return this.awaitingUnitIds
       .map((id) => this.unitById(id))
       .filter((unit): unit is UnitSnapshot => unit !== undefined);
-  }
-
-  /** 布阵阶段可交换站位的是全部存活的我方单位。 */
-  get deployableUnits(): UnitSnapshot[] {
-    if (this.phase !== 'deployment') return [];
-    return this.allies.filter((unit) => unit.alive);
   }
 }

@@ -4,6 +4,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 import type { ClientMessage, ServerMessage } from '../shared/protocol.ts';
 import { BattleSession } from './battle-session.ts';
+import { readPartyConfig, writePartyConfig } from './party-config.ts';
 
 /**
  * 战斗服。
@@ -99,8 +100,14 @@ function handleConnection(socket: WebSocket): void {
     return session;
   };
 
-  const startSession = (battlefieldId?: string, seed?: number): void => {
-    session = BattleSession.create({ sessionId: randomUUID(), battlefieldId, seed });
+  /**
+   * 开一局。
+   * 阵法与场景一律从**队伍配置**里读 —— 它们是战斗外的设定，
+   * 客户端不能靠 join 参数随手改（顶栏那个临时入口走的是 savePartyConfig）。
+   */
+  const startSession = async (seed?: number): Promise<void> => {
+    const config = await readPartyConfig();
+    session = BattleSession.create({ sessionId: randomUUID(), config, seed });
   };
 
   const handle = async (raw: string): Promise<void> => {
@@ -116,12 +123,19 @@ function handleConnection(socket: WebSocket): void {
       switch (message.type) {
         case 'join':
         case 'restart':
-          startSession(message.battlefieldId, message.seed);
+          await startSession(message.seed);
           sync();
           break;
 
-        case 'swapPositions':
-          requireSession().swapPositions(message.unitAId, message.unitBId);
+        case 'savePartyConfig':
+          // 阵法与场景是战斗外的设定，改了等于换一场仗 —— 所以保存之后直接重开一局
+          await writePartyConfig({
+            formationId: message.formationId,
+            battlefieldId: message.battlefieldId,
+            environmentId: message.environmentId,
+            weatherId: message.weatherId,
+          });
+          await startSession();
           sync();
           break;
 
@@ -132,6 +146,11 @@ function handleConnection(socket: WebSocket): void {
 
         case 'submitCommands':
           await requireSession().submitCommands(message.actions);
+          sync();
+          break;
+
+        case 'triggerEvent':
+          await requireSession().triggerEvent(message.eventId);
           sync();
           break;
 

@@ -5,15 +5,18 @@ import type {
   BattlePosition,
   BattleResult,
   CommandId,
+  EnvironmentTheme,
+  Formation,
   PendingAction,
   Side,
   Stats,
+  WeatherPreset,
 } from './data/types.ts';
 
 /**
  * 前后端协议。
  *
- * 原则：服务端是唯一权威。客户端只能发「意图」（换位、下指令、开战），
+ * 原则：服务端是唯一权威。客户端只能发「意图」（换阵、开战、下指令、触发事件），
  * 所有战斗状态一律由服务端下发，客户端不许自己算任何战斗结果。
  */
 
@@ -53,11 +56,23 @@ export interface UnitSnapshot {
   captured: boolean;
   alive: boolean;
   isPlayerControlled: boolean;
+  /** 所站阵位的角色名（如「锋头」），只有我方有。 */
+  formationRole?: string;
   /**
    * 指令可用性，只对我方单位下发。
    * 「这个特技现在能不能放」是规则判断，客户端不该自己推一份 —— 那是双份真源的开始。
    */
   commands?: CommandAvailability[];
+}
+
+/**
+ * 场景外观。
+ * 服务端把**完整数据**下发，而不是只给 id 让客户端去查表 ——
+ * 这样客户端手里那份永远是服务端认定的那一份，不会因为版本错位而画错。
+ */
+export interface Scenery {
+  environment: EnvironmentTheme;
+  weather: WeatherPreset;
 }
 
 /** 完整战斗状态。客户端收到后直接镜像，不做二次推导。 */
@@ -66,6 +81,10 @@ export interface BattleSnapshot {
   phase: BattlePhase;
   turn: number;
   battlefield: Battlefield;
+  /** 我方当前阵法。站位、阵图连线都在里面。 */
+  formation: Formation;
+  /** 场景外观（只影响观感）。 */
+  scenery: Scenery;
   units: UnitSnapshot[];
   /** 正在等待指令的我方单位 id（按下达顺序）。 */
   awaitingUnitIds: string[];
@@ -101,23 +120,41 @@ export type BattleRecord =
       hpAfter: number;
     }
   | { kind: 'status'; unitId: string; name: string; statusKind: 'buff' | 'debuff' }
-  | { kind: 'afterAction'; actorId: string };
+  | { kind: 'afterAction'; actorId: string }
+  /**
+   * 剧情级事件（天雷、地震、海啸……）。
+   * 演出锚点在战场上方的事件区 —— 那块区域目前不渲染，只作为降临位置。
+   */
+  | {
+      kind: 'stageEvent';
+      eventId: string;
+      name: string;
+      /** 演出时显示在日志与画面上的文案。 */
+      text: string;
+      anchor: { x: number; y: number; z: number };
+    };
 
 // ---------------------------------------------------------------------------
 // 客户端 → 服务端
 // ---------------------------------------------------------------------------
 
 export type ClientMessage =
-  /** 进入战斗。服务端会开一个新会话，或按 sessionId 接回已有的。 */
-  | { type: 'join'; sessionId?: string; battlefieldId?: string; seed?: number }
-  /** 布阵阶段交换两个我方单位的站位。 */
-  | { type: 'swapPositions'; unitAId: string; unitBId: string }
+  /** 进入战斗。阵法 / 战场 / 场景一律用服务端存好的队伍配置。 */
+  | { type: 'join'; seed?: number }
+  /**
+   * 保存队伍配置（阵法、战场、环境、天气），并立刻按新配置重开一局。
+   * 之所以「保存 + 重开」绑在一起：阵法与场景都是战斗外的设定，
+   * 战斗中换它们等于换一场仗，不如重开干净。
+   */
+  | { type: 'savePartyConfig'; formationId?: string; battlefieldId?: string; environmentId?: string; weatherId?: string }
   /** 布阵完成，开打。 */
   | { type: 'beginBattle' }
   /** 提交一整回合的指令。 */
   | { type: 'submitCommands'; actions: PendingAction[] }
-  /** 重开一局。 */
-  | { type: 'restart'; battlefieldId?: string; seed?: number };
+  /** 手动触发一个剧情事件（目前只有天雷，用于验证事件链路）。 */
+  | { type: 'triggerEvent'; eventId: string }
+  /** 重开一局（沿用当前配置）。 */
+  | { type: 'restart'; seed?: number };
 
 // ---------------------------------------------------------------------------
 // 服务端 → 客户端

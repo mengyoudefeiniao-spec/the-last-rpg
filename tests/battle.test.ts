@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import { createRng } from '../src/shared/core/rng.ts';
 import { getBattlefield } from '../src/shared/data/battlefields.ts';
+import { getFormation, listFormations } from '../src/shared/data/formations.ts';
 import { createSampleBattleUnits } from '../src/shared/data/sample-battle.ts';
 import { getStatusDef } from '../src/shared/data/statuses.ts';
 import type { BattlePhase } from '../src/shared/data/types.ts';
@@ -23,11 +24,16 @@ function makeBattle(seed: number): Battle {
   return new Battle({ units: createSampleBattleUnits().map(createUnit), seed });
 }
 
-/** 指定战场的一局。 */
-function makeBattleOn(battlefieldId: string, seed: number): Battle {
+/** 指定战场的一局。默认摆锋矢阵 —— 阵法现在决定我方站位。 */
+function makeBattleOn(
+  battlefieldId: string,
+  seed: number,
+  formationId = 'arrow-head',
+): Battle {
   return new Battle({
     units: createSampleBattleUnits().map(createUnit),
     battlefield: getBattlefield(battlefieldId),
+    formation: getFormation(formationId),
     seed,
   });
 }
@@ -241,58 +247,85 @@ test('挂了 director 时，演出点会被依次回调', async () => {
 // 布阵与地形
 // ---------------------------------------------------------------------------
 
-test('布阵阶段按战场槽位分派站位', () => {
+test('阵法决定我方站位，敌方用战场自带的槽位', () => {
   const battle = makeBattleOn('snow-ridge', 1);
   battle.start();
 
   assert.equal(battle.phase, 'deployment', '开局应当停在布阵阶段');
 
-  const battlefield = battle.battlefield;
+  const formation = battle.formation;
   const allies = battle.units.filter((unit) => unit.side === 'ally');
-  assert.ok(battlefield.allySlots.length > 0, '战场应当定义了阵型槽位');
-  assert.equal(allies.length, battlefield.allySlots.length, '我方人数应当与槽位数一致');
+  assert.ok(formation.slots.length > 0, '阵法应当定义了阵位');
+  assert.equal(allies.length, formation.slots.length, '我方人数应当与阵位数一致');
 
-  for (const unit of allies) {
-    const onSomeSlot = battlefield.allySlots.some(
-      (slot) => slot.x === unit.position.x && slot.z === unit.position.z,
-    );
-    assert.ok(onSomeSlot, `${unit.name} 没有落在任何阵型槽位上`);
-  }
+  allies.forEach((unit, index) => {
+    const slot = formation.slots[index];
+    assert.ok(slot, `第 ${index + 1} 号单位应当有对应阵位`);
+    assert.equal(unit.position.x, slot.x, `${unit.name} 应当落在阵位上`);
+    assert.equal(unit.position.z, slot.z, `${unit.name} 应当落在阵位上`);
+  });
+
+  // 敌方不设阵法
+  const enemies = battle.units.filter((unit) => unit.side === 'enemy');
+  const enemySlots = battle.battlefield.enemySlots;
+  enemies.forEach((unit, index) => {
+    const slot = enemySlots[index];
+    assert.ok(slot, `敌方第 ${index + 1} 号应当有槽位`);
+    assert.equal(unit.position.x, slot.x);
+    assert.equal(unit.position.z, slot.z);
+  });
 });
 
-test('布阵换位真的会交换坐标，且只允许在布阵阶段', async () => {
-  const battle = makeBattleOn('snow-ridge', 2);
-  battle.start();
+test('换一个阵法，站位会变，踩进地形的人数也随之变化', () => {
+  const build = (formationId: string): Battle =>
+    new Battle({
+      units: createSampleBattleUnits().map(createUnit),
+      battlefield: getBattlefield('snow-ridge'),
+      formation: getFormation(formationId),
+      seed: 3,
+    });
 
-  const battlefield = battle.battlefield;
-  const allies = battle.units.filter((unit) => unit.side === 'ally');
+  const positionsOf = (battle: Battle): string[] =>
+    battle.units
+      .filter((unit) => unit.side === 'ally')
+      .map((unit) => `${unit.position.x},${unit.position.z}`);
 
-  const insideZone = allies.find((unit) => zoneAt(battlefield, unit.position) !== undefined);
-  const outsideZone = allies.find((unit) => zoneAt(battlefield, unit.position) === undefined);
-  assert.ok(insideZone, '雪山战场应当有落在冻伤区里的槽位');
-  assert.ok(outsideZone, '雪山战场应当有落在冻伤区外的槽位');
+  const arrow = build('arrow-head');
+  const snake = build('long-snake');
+  assert.notDeepEqual(positionsOf(arrow), positionsOf(snake), '不同阵法的落点应当不同');
 
-  const insideBefore = { ...insideZone.position };
-  const outsideBefore = { ...outsideZone.position };
+  const frozenCount = (battle: Battle): number =>
+    battle.units.filter(
+      (unit) => unit.side === 'ally' && zoneAt(battle.battlefield, unit.position) !== undefined,
+    ).length;
 
-  assert.equal(battle.swapPositions(insideZone.id, outsideZone.id), true);
-  assert.deepEqual(insideZone.position, outsideBefore, '甲应当搬到乙原来的位置');
-  assert.deepEqual(outsideZone.position, insideBefore, '乙应当搬到甲原来的位置');
-
-  // 换位后：原本在圈里的人出圈，原本在圈外的人进圈
-  assert.equal(
-    zoneAt(battlefield, insideZone.position),
-    undefined,
-    '换位后原本站在冻伤区的单位应当已经离开该区域',
+  const counts = ['arrow-head', 'crane-wing', 'fish-scale', 'long-snake', 'square-circle'].map(
+    (id) => frozenCount(build(id)),
   );
+
   assert.ok(
-    zoneAt(battlefield, outsideZone.position) !== undefined,
-    '换位后原本在圈外的单位应当进入冻伤区',
+    new Set(counts).size > 1,
+    `五个阵法踩进冻伤区的人数不该完全相同，否则阵法只是摆设：${JSON.stringify(counts)}`,
   );
+});
 
-  // 开打之后就不许再挪了 —— 这条由服务端把关
-  await battle.beginBattle();
-  assert.equal(battle.swapPositions(insideZone.id, outsideZone.id), false, '战斗开始后不应还能换位');
+test('每种阵法都有自己的阵图连线，且连线不指向不存在的阵位', () => {
+  for (const formation of listFormations()) {
+    assert.ok(formation.slots.length > 0, `${formation.name} 应当有阵位`);
+    assert.ok(formation.links.length > 0, `${formation.name} 应当有阵图连线`);
+
+    for (const link of formation.links) {
+      assert.ok(
+        link.from >= 0 && link.from < formation.slots.length,
+        `${formation.name} 的连线起点越界`,
+      );
+      assert.ok(
+        link.to >= 0 && link.to < formation.slots.length,
+        `${formation.name} 的连线终点越界`,
+      );
+      assert.notEqual(link.from, link.to, `${formation.name} 的连线不该自己连自己`);
+    }
+  }
 });
 
 test('地形状态只给站在区域内的单位', async () => {

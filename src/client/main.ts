@@ -14,7 +14,7 @@ if (!app) throw new Error('找不到 #app 容器');
  *
  * 注意这里的依赖方向：mirror 从服务端推来的快照填充，stage 与 view 只读 mirror；
  * 玩家意图则原样转发给服务端，中途不做任何本地状态修改。
- * 客户端唯一的「记忆」就是那份快照。
+ * 客户端唯一的「记忆」就是那份快照 —— 连阵法与场景也不例外，它们都存在服务端。
  */
 const mirror = new BattleMirror();
 
@@ -26,15 +26,23 @@ const client = new BattleClient({
   onStatusChange: (status, detail) => view.setConnectionStatus(status, detail),
 });
 
+/** 换一场仗（重开 / 改队伍配置）时，3D 场景必须整个重建：单位、阵图、天气都换了。 */
+function resetStage(): void {
+  stage?.dispose();
+  stage = null;
+}
+
 view = new BattleView(app, mirror, {
-  onSwap: (unitAId, unitBId) => client.send({ type: 'swapPositions', unitAId, unitBId }),
   onBeginBattle: () => client.send({ type: 'beginBattle' }),
   onSubmit: (actions) => client.send({ type: 'submitCommands', actions }),
+  onTriggerEvent: (eventId) => client.send({ type: 'triggerEvent', eventId }),
   onRestart: () => {
-    // 换局会换掉战场与单位，3D 场景必须重建
-    stage?.dispose();
-    stage = null;
+    resetStage();
     client.send({ type: 'restart' });
+  },
+  onSavePartyConfig: (patch) => {
+    resetStage();
+    client.send({ type: 'savePartyConfig', ...patch });
   },
 });
 
@@ -57,7 +65,7 @@ async function handleMessage(message: ServerMessage): Promise<void> {
 
   const { snapshot, records } = message;
 
-  // 首次同步（或重开后）：这时才拿到战场与单位，才能把 3D 场景建起来
+  // 首次同步（或换局之后）：这时才拿到战场、阵法与场景，才能把 3D 舞台建起来
   if (!stage) {
     mirror.applySnapshot(snapshot);
     stage = new BattleStage(view.stageContainer, mirror, {

@@ -21,6 +21,9 @@ scratch/
 # 工具产物
 .reasonix/
 
+# 服务端运行期数据（队伍配置等，重启后应当保留但不必入库）
+.runtime/
+
 # 系统文件
 .DS_Store
 Thumbs.db

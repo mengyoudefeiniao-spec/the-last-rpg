@@ -7,6 +7,8 @@ import type { BattleRecord, UnitSnapshot } from '../../shared/protocol.ts';
 import { zoneAt } from '../../shared/systems/battle/terrain.ts';
 import type { BattleMirror } from '../state/battle-mirror.ts';
 import { Animator } from './animator.ts';
+import { FormationView } from './formation-view.ts';
+import { WeatherLayer } from './weather.ts';
 import './battle-stage.css';
 
 /** 这几类指令是「冲上去打」，演出时会移动到目标身前。 */
@@ -114,6 +116,12 @@ export class BattleStage {
   private readonly views = new Map<string, UnitView>();
   private readonly pickables: THREE.Object3D[] = [];
   private readonly terrainGroup = new THREE.Group();
+  /** 阵图。布阵阶段显眼，开打之后淡下去。 */
+  private readonly formationView: FormationView | null;
+  /** 天气粒子。「晴」这种 density 为 0 的天气没有粒子层。 */
+  private readonly weatherLayer: WeatherLayer | null;
+  /** 阵图当前浓淡 —— 缓存一下，免得每帧都写材质。 */
+  private formationProminent = true;
 
   private frame = 0;
   private disposed = false;
@@ -165,6 +173,8 @@ export class BattleStage {
 
     this.buildEnvironment();
     this.buildTerrain();
+    this.formationView = this.buildFormation();
+    this.weatherLayer = this.buildWeather();
     this.buildUnits();
 
     this.renderer.domElement.addEventListener('pointerdown', this.handlePointerDown);
@@ -217,7 +227,90 @@ export class BattleStage {
       case 'afterAction':
         await this.playAfterAction(record.actorId);
         break;
+
+      case 'stageEvent':
+        await this.playStageEvent(record.anchor, record.name, record.text);
+        break;
     }
+  }
+
+  /**
+   * 剧情事件演出：从天而降。
+   *
+   * 一道雷柱自事件区（战场上方那块**不渲染**的区域）直插战场，同时压下一道强光与横幅。
+   * 海啸、地震、渡劫天雷这类效果共用这一个入口 —— 加新事件不需要动这里。
+   */
+  private async playStageEvent(
+    anchor: { x: number; y: number; z: number },
+    name: string,
+    text: string,
+  ): Promise<void> {
+    const boltMaterial = new THREE.MeshBasicMaterial({
+      color: 0xcfe8ff,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+    });
+
+    const bolt = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.22, 0.52, anchor.y, 12),
+      boltMaterial,
+    );
+    bolt.position.set(anchor.x, anchor.y / 2, anchor.z);
+    this.scene.add(bolt);
+
+    const glow = new THREE.PointLight(0xcfe8ff, 0, anchor.y * 2);
+    glow.position.set(anchor.x, anchor.y * 0.7, anchor.z);
+    this.scene.add(glow);
+
+    this.showBanner(name, text);
+
+    // 劈落
+    await this.animator.tween(0.18, (t) => {
+      boltMaterial.opacity = 0.9 - t * 0.3;
+      bolt.scale.x = 1 + t * 0.8;
+      bolt.scale.z = 1 + t * 0.8;
+      glow.intensity = t * 320;
+    });
+
+    // 余晖散去
+    await this.animator.tween(0.55, (t) => {
+      boltMaterial.opacity = 0.6 * (1 - t);
+      bolt.scale.y = 1 - t * 0.12;
+      glow.intensity = 320 * (1 - t);
+    });
+
+    this.scene.remove(bolt);
+    this.scene.remove(glow);
+    bolt.geometry.dispose();
+    boltMaterial.dispose();
+  }
+
+  /** 战场上方的一次性横幅，用于剧情事件。 */
+  private showBanner(name: string, text: string): void {
+    const element = document.createElement('div');
+    element.className = 'stage-banner';
+
+    const title = document.createElement('b');
+    title.textContent = name;
+    const subtitle = document.createElement('span');
+    subtitle.textContent = text;
+    element.append(title, subtitle);
+
+    const object = new CSS2DObject(element);
+    object.position.set(0, 7.5, 0);
+    this.scene.add(object);
+
+    void this.animator
+      .tween(1.8, (t) => {
+        element.style.opacity = String(
+          t < 0.12 ? t / 0.12 : Math.max(0, 1 - (t - 0.12) / 0.88),
+        );
+      })
+      .then(() => {
+        this.scene.remove(object);
+        element.remove();
+      });
   }
 
   /** 回合开始：全体归位站好，清掉上一轮的姿态残留。 */
@@ -382,6 +475,8 @@ export class BattleStage {
     this.renderer.domElement.removeEventListener('pointerdown', this.handlePointerDown);
     this.renderer.domElement.removeEventListener('pointerup', this.handlePointerUp);
     this.controls.dispose();
+    this.formationView?.dispose();
+    this.weatherLayer?.dispose();
 
     this.scene.traverse((object) => {
       const mesh = object as Partial<THREE.Mesh>;
@@ -399,14 +494,32 @@ export class BattleStage {
   // 场景搭建
   // ==========================================================================
 
+  /**
+   * 搭建场景外观。
+   * 颜色、雾气、光照全部来自服务端下发的环境主题 —— 想让战斗发生在雪原还是焦土上，
+   * 只改队伍配置里的 environmentId，这里一行都不用动。
+   */
   private buildEnvironment(): void {
-    this.scene.background = new THREE.Color(FOG_COLOR);
-    this.scene.fog = new THREE.Fog(FOG_COLOR, 30, 62);
+    const theme = this.mirror.scenery?.environment;
 
-    this.scene.add(new THREE.HemisphereLight(0x9fc4ff, 0x11161f, 1.1));
+    this.scene.background = new THREE.Color(theme?.sky ?? FOG_COLOR);
+    this.scene.fog = new THREE.Fog(
+      theme?.fog ?? FOG_COLOR,
+      theme?.fogNear ?? 30,
+      theme?.fogFar ?? 62,
+    );
 
-    const key = new THREE.DirectionalLight(0xffe6bd, 2.0);
-    key.position.set(9, 17, 11);
+    this.scene.add(
+      new THREE.HemisphereLight(
+        theme?.hemiSky ?? 0x9fc4ff,
+        theme?.hemiGround ?? 0x11161f,
+        1.1,
+      ),
+    );
+
+    const key = new THREE.DirectionalLight(theme?.keyLight ?? 0xffe6bd, theme?.keyIntensity ?? 2.0);
+    const lightDirection: readonly [number, number, number] = theme?.keyDirection ?? [9, 17, 11];
+    key.position.set(lightDirection[0], lightDirection[1], lightDirection[2]);
     key.castShadow = true;
     key.shadow.mapSize.set(1024, 1024);
     key.shadow.camera.left = -16;
@@ -419,13 +532,22 @@ export class BattleStage {
 
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(64, 64),
-      new THREE.MeshStandardMaterial({ color: 0x1b2533, roughness: 0.95, metalness: 0.05 }),
+      new THREE.MeshStandardMaterial({
+        color: theme?.ground ?? 0x1b2533,
+        roughness: 0.95,
+        metalness: 0.05,
+      }),
     );
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
     this.scene.add(ground);
 
-    const grid = new THREE.GridHelper(64, 64, 0x2f4358, 0x1f2c3c);
+    const grid = new THREE.GridHelper(
+      64,
+      64,
+      theme?.gridMajor ?? 0x2f4358,
+      theme?.gridMinor ?? 0x1f2c3c,
+    );
     grid.position.y = 0.005;
     this.scene.add(grid);
 
@@ -438,6 +560,28 @@ export class BattleStage {
     this.scene.add(divider);
 
     this.scene.add(this.terrainGroup);
+  }
+
+  /** 阵图：把阵法的阵位与连线画在地上。没有阵法数据就不画。 */
+  private buildFormation(): FormationView | null {
+    const formation = this.mirror.formation;
+    if (!formation || formation.slots.length === 0) return null;
+
+    const view = new FormationView(formation);
+    view.setProminence(this.mirror.phase === 'deployment');
+    this.formationProminent = this.mirror.phase === 'deployment';
+    this.scene.add(view.object);
+    return view;
+  }
+
+  /** 天气粒子。「晴」这类 density 为 0 的天气不建粒子层。 */
+  private buildWeather(): WeatherLayer | null {
+    const weather = this.mirror.scenery?.weather;
+    if (!weather || weather.density <= 0) return null;
+
+    const layer = new WeatherLayer(weather);
+    this.scene.add(layer.object);
+    return layer;
   }
 
   /** 地形分区：半透明圆盘 + 边缘环 + 名称标签。 */
@@ -719,10 +863,21 @@ export class BattleStage {
     this.syncPositions(dt);
     this.syncBars();
     this.syncRingPulse();
+    this.weatherLayer?.update(dt);
+    this.syncFormationProminence();
 
     this.renderer.render(this.scene, this.camera);
     this.labelRenderer.render(this.scene, this.camera);
   };
+
+  /** 阵图只在布阵阶段显眼 —— 开打之后它就是噪点了。 */
+  private syncFormationProminence(): void {
+    const prominent = this.mirror.phase === 'deployment';
+    if (prominent === this.formationProminent) return;
+
+    this.formationProminent = prominent;
+    this.formationView?.setProminence(prominent);
+  }
 
   /**
    * 站位同步：快照里的 position 变了（布阵换位）就平滑挪过去。

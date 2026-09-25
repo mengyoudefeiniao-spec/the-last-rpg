@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import type { ClientMessage, ServerMessage } from '../src/shared/protocol.ts';
@@ -11,13 +15,25 @@ import { startBattleServer } from '../src/server/server.ts';
  * 客户端只能发意图、服务端裁决后才改状态、状态与演出剧本一起下发。
  */
 
-/** 起一个只服务这次测试的战斗服，端口交给系统分配。 */
+/**
+ * 起一个只服务这次测试的战斗服。
+ *
+ * 端口交给系统分配；队伍配置也重定向到临时文件 ——
+ * 否则跑一次测试就会把开发者本地的阵法与场景改掉（这个坑真踩过一次）。
+ */
 async function withServer<T>(run: (url: string) => Promise<T>): Promise<T> {
+  const previous = process.env['PARTY_CONFIG_PATH'];
+  const configPath = join(tmpdir(), `rpg-party-config-${randomUUID()}.json`);
+  process.env['PARTY_CONFIG_PATH'] = configPath;
+
   const server = await startBattleServer({ port: 0 });
   try {
     return await run(server.url);
   } finally {
     await server.close();
+    await rm(configPath, { force: true });
+    if (previous === undefined) delete process.env['PARTY_CONFIG_PATH'];
+    else process.env['PARTY_CONFIG_PATH'] = previous;
   }
 }
 
@@ -96,33 +112,84 @@ test('连上并入局后拿到初始快照，且停在布阵阶段', async () =>
   });
 });
 
-test('服务端裁决换位：坐标真的换了，且只限我方', async () => {
+test('队伍配置是战斗外的设定：改了会按新配置重开一局', async () => {
+  await withServer(async (url) => {
+    const client = await TestClient.connect(url);
+    try {
+      client.send({ type: 'join' });
+      const before = await client.nextSnapshot();
+
+      client.send({
+        type: 'savePartyConfig',
+        formationId: 'square-circle',
+        environmentId: 'frost-peak',
+        weatherId: 'snowfall',
+      });
+      const after = await client.nextSnapshot();
+
+      assert.notEqual(after.snapshot.sessionId, before.snapshot.sessionId, '应当换了一局');
+      assert.equal(after.snapshot.phase, 'deployment', '重开后回到布阵阶段');
+      assert.equal(after.snapshot.formation.id, 'square-circle', '阵法应当生效');
+      assert.equal(after.snapshot.scenery.environment.id, 'frost-peak', '环境应当生效');
+      assert.equal(after.snapshot.scenery.weather.id, 'snowfall', '天气应当生效');
+
+      // 站位应当跟着新阵法走 —— 阵法定站位，客户端改不了
+      const allyPositions = after.snapshot.units
+        .filter((unit) => unit.side === 'ally')
+        .map((unit) => `${unit.position.x},${unit.position.z}`);
+      const expected = after.snapshot.formation.slots.map((slot) => `${slot.x},${slot.z}`);
+      assert.deepEqual(allyPositions, expected, '我方站位应当与新阵法一致');
+    } finally {
+      client.close();
+    }
+  });
+});
+
+test('协议里已经没有「战斗中换位」这条旁路', async () => {
+  await withServer(async (url) => {
+    const client = await TestClient.connect(url);
+    try {
+      client.send({ type: 'join' });
+      await client.nextSnapshot();
+
+      // 站位只由阵法决定，客户端不该有别的路子挪人
+      client.send({ type: 'swapPositions', unitAId: 'a', unitBId: 'b' } as never);
+      const denied = await client.next();
+      assert.equal(denied.type, 'error', '未知意图必须被拒绝');
+    } finally {
+      client.close();
+    }
+  });
+});
+
+test('剧情事件从上方降临：服务端结算并下发演出记录', async () => {
   await withServer(async (url) => {
     const client = await TestClient.connect(url);
     try {
       client.send({ type: 'join' });
       const welcome = await client.nextSnapshot();
 
-      const allies = welcome.snapshot.units.filter((unit) => unit.side === 'ally');
-      const first = allies[0];
-      const second = allies[1];
-      assert.ok(first && second, '应当至少有两位我方单位');
+      const hpBefore = new Map(welcome.snapshot.units.map((unit) => [unit.id, unit.stats.hp]));
 
-      client.send({ type: 'swapPositions', unitAId: first.id, unitBId: second.id });
-      const { snapshot } = await client.nextSnapshot();
+      client.send({ type: 'triggerEvent', eventId: 'thunder' });
+      const message = await client.nextSnapshot();
 
-      const movedFirst = snapshot.units.find((unit) => unit.id === first.id);
-      const movedSecond = snapshot.units.find((unit) => unit.id === second.id);
-      assert.deepEqual(movedFirst?.position, second.position, '甲应当搬到乙原来的位置');
-      assert.deepEqual(movedSecond?.position, first.position, '乙应当搬到甲原来的位置');
+      const eventRecord = message.records.find((record) => record.kind === 'stageEvent');
+      assert.ok(eventRecord, '应当有剧情事件的演出记录');
+      if (eventRecord?.kind === 'stageEvent') {
+        assert.equal(eventRecord.eventId, 'thunder');
+        assert.ok(eventRecord.anchor.y > 0, '演出锚点应当在战场上方（事件区）');
+      }
 
-      // 拿敌人来换 —— 服务端必须拒绝
-      const enemy = snapshot.units.find((unit) => unit.side === 'enemy');
-      assert.ok(enemy);
-      client.send({ type: 'swapPositions', unitAId: first.id, unitBId: enemy.id });
+      for (const unit of message.snapshot.units) {
+        const before = hpBefore.get(unit.id) ?? 0;
+        assert.ok(unit.stats.hp < before, `${unit.name} 应当被天雷劈中而掉血`);
+      }
 
+      // 未知事件必须被拒绝
+      client.send({ type: 'triggerEvent', eventId: '不存在的事件' });
       const denied = await client.next();
-      assert.equal(denied.type, 'error', '不该允许把敌人拖来拖去');
+      assert.equal(denied.type, 'error');
     } finally {
       client.close();
     }

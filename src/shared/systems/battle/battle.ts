@@ -10,9 +10,11 @@ import type {
   BattleResult,
   BattleUnit,
   CommandDef,
+  Formation,
   LogKind,
   PendingAction,
   Side,
+  StageEventDef,
   StatKey,
   StatusDef,
   StatusTrigger,
@@ -83,15 +85,26 @@ export interface BattleDirector {
   onStatus?(report: StatusReport): Promise<void> | void;
   /** 行动结束：角色归位。 */
   afterAction?(actor: BattleUnit): Promise<void> | void;
+  /** 剧情级事件降临（天雷、地震、海啸……），演出在战场上方的事件区展开。 */
+  onStageEvent?(
+    def: StageEventDef,
+    targets: BattleUnit[],
+    anchor: { x: number; y: number; z: number },
+  ): Promise<void> | void;
 }
 
 export interface BattleOptions {
   units: BattleUnit[];
   /**
-   * 战场定义：阵型槽位与地形分区。
+   * 战场定义：敌方阵位与地形分区。
    * 省略时用一份没有地形的空白战场 —— 单元测试与自动战斗走这条路。
    */
   battlefield?: Battlefield;
+  /**
+   * 我方阵法。它决定我方站在哪，进而决定吃到什么地形 —— 这是阵法的全部规则作用。
+   * 省略时用空白阵法（阵位为空，站位保持 createUnit 给的默认值）。
+   */
+  formation?: Formation;
   /** 固定 seed 即可重放同一场战斗，便于复现 bug。 */
   seed?: number;
 }
@@ -105,9 +118,26 @@ function emptyBattlefield(): Battlefield {
     id: 'empty',
     name: '无名之地',
     desc: '此地并无特异之处。',
-    allySlots: [],
     enemySlots: [],
     zones: [],
+    eventArea: {
+      center: { x: 0, y: 26, z: 0 },
+      radius: 16,
+      height: 14,
+      note: '测试用的空白战场，事件区不参与任何逻辑',
+    },
+  };
+}
+
+/** 没有阵位的空白阵法 —— 站位保持 createUnit 给的默认值。 */
+function emptyFormation(): Formation {
+  return {
+    id: 'none',
+    name: '无阵',
+    desc: '散兵游勇，不成阵势。',
+    slots: [],
+    links: [],
+    color: 0x8899aa,
   };
 }
 
@@ -116,7 +146,7 @@ function emptyBattlefield(): Battlefield {
  *
  * 完整流程：
  *
- *   0. deployment       布阵：交换站位、观察战场（只有这阶段允许调整站位）
+ *   0. deployment       布阵：预览阵法、地形与场景（站位由阵法定，此处不可更改）
  *   1. turnStart        回合开始：同步地形状态、自然回复、回合开始触发的状态结算
  *   2. commandInput     玩家选择指令（此处暂停，等待调用方 submit）
  *   3. statusSettlement 状态结算：判定能否行动、汇总属性修正
@@ -133,8 +163,11 @@ export class Battle {
   readonly events = new EventBus<BattleEvents>();
   readonly log: BattleLogEntry[] = [];
 
-  /** 战场：阵型槽位与地形分区。 */
+  /** 战场：敌方阵位与地形分区。 */
   readonly battlefield: Battlefield;
+
+  /** 我方阵法。站位在构造时就按它定死了，战斗中不变。 */
+  readonly formation: Formation;
 
   /** 表现层。可以在构造之后再挂上。 */
   director: BattleDirector | undefined;
@@ -153,23 +186,42 @@ export class Battle {
   constructor(options: BattleOptions) {
     this.units = options.units;
     this.battlefield = options.battlefield ?? emptyBattlefield();
+    this.formation = options.formation ?? emptyFormation();
     this.rng = createRng(options.seed ?? 0x5eed);
     this.assignInitialPositions();
   }
 
-  /** 按战场槽位分派初始站位；槽位不够时保持原样。 */
+  /**
+   * 按阵位分派初始站位。
+   *
+   * 我方用**阵法**的阵位 —— 这是阵法的全部规则作用：它决定你站哪，
+   * 进而决定你吃到哪个地形。敌方不设阵法，用战场自带的 enemySlots。
+   */
   private assignInitialPositions(): void {
-    const assign = (side: Side, slots: Battlefield['allySlots']): void => {
-      this.units
-        .filter((unit) => unit.side === side)
-        .forEach((unit, index) => {
-          const slot = slots[index];
-          if (slot) unit.position = { ...slot };
-        });
+    const place = (
+      units: BattleUnit[],
+      slots: ReadonlyArray<{ x: number; z: number }>,
+    ): void => {
+      units.forEach((unit, index) => {
+        const slot = slots[index];
+        if (slot) unit.position = { x: slot.x, z: slot.z };
+      });
     };
 
-    assign('ally', this.battlefield.allySlots);
-    assign('enemy', this.battlefield.enemySlots);
+    place(
+      this.units.filter((unit) => unit.side === 'ally'),
+      this.formation.slots,
+    );
+    place(
+      this.units.filter((unit) => unit.side === 'enemy'),
+      this.battlefield.enemySlots,
+    );
+  }
+
+  /** 某个我方单位站的是哪个阵位（没有则 undefined）。 */
+  formationSlotOf(unitId: string): Formation['slots'][number] | undefined {
+    const index = this.units.filter((unit) => unit.side === 'ally').findIndex((u) => u.id === unitId);
+    return index >= 0 ? this.formation.slots[index] : undefined;
   }
 
   get finished(): boolean {
@@ -182,15 +234,18 @@ export class Battle {
     return this.survivorsOf('ally').filter((unit) => unit.isPlayerControlled);
   }
 
-  /** 进入布阵阶段：此时可以交换站位、自由观察战场。 */
+  /** 进入布阵阶段：预览阵法与地形，确认后开战。站位由阵法定死，此处不能改。 */
   start(): void {
     if (this.turn !== 0) throw new Error('战斗已经开始，请新建实例');
     this.enterPhase('deployment');
+
     this.logIt('system', `来到「${this.battlefield.name}」—— ${this.battlefield.desc}`);
+    this.logIt('system', `我方形「${this.formation.name}」—— ${this.formation.desc}`);
 
     for (const zone of this.battlefield.zones) {
       this.logIt('status', `地形「${zone.name}」：${zone.desc}`);
     }
+
     for (const unit of this.units) {
       if (unit.side === 'ally') this.reportPosition(unit);
     }
@@ -198,48 +253,81 @@ export class Battle {
     this.events.emit('update', undefined);
   }
 
-  /**
-   * 布阵阶段交换两个我方单位的站位。
-   * 只有这个阶段允许、且只能在自己人之间换 —— 由服务端把关，客户端绕不过去。
-   */
-  swapPositions(unitAId: string, unitBId: string): boolean {
-    if (this.phase !== 'deployment') return false;
-    if (unitAId === unitBId) return false;
-
-    const a = this.units.find((unit) => unit.id === unitAId);
-    const b = this.units.find((unit) => unit.id === unitBId);
-    if (!a || !b) return false;
-    if (a.side !== 'ally' || b.side !== 'ally') return false;
-
-    const swapped = { ...a.position };
-    a.position = { ...b.position };
-    b.position = swapped;
-
-    this.logIt('system', `${a.name} 与 ${b.name} 交换了站位`);
-    this.reportPosition(a);
-    this.reportPosition(b);
-
-    this.events.emit('update', undefined);
-    return true;
-  }
-
   /** 布阵完成，开打。 */
   async beginBattle(): Promise<void> {
     if (this.phase !== 'deployment') throw new Error('当前不在布阵阶段');
-    this.logIt('system', '布阵已定，战斗开始！');
+    this.logIt('system', '阵势已定，战斗开始！');
     await this.beginTurn();
     this.events.emit('update', undefined);
   }
 
-  /** 把某个我方单位的落点写进日志，玩家据此判断该把谁放在哪。 */
+  /** 把某个我方单位的落点与阵位写进日志 —— 玩家据此看清这个阵法的代价。 */
   private reportPosition(unit: BattleUnit): void {
     const { zone } = desiredTerrainEffects(this.battlefield, unit.position);
+    const slot = this.formationSlotOf(unit.id);
+    const who = slot ? `${unit.name}（${slot.role}）` : unit.name;
+
     this.logIt(
       'status',
-      zone
-        ? `${unit.name} 立于「${zone.name}」 —— ${zone.desc}`
-        : `${unit.name} 处于普通地面`,
+      zone ? `${who} 立于「${zone.name}」 —— ${zone.desc}` : `${who} 处于普通地面`,
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // 剧情事件
+  // -------------------------------------------------------------------------
+
+  /**
+   * 剧情事件降临。
+   *
+   * 事件不属于任何单位 —— 它从战场上方的事件区（StageEventArea）压下来，
+   * 对全场存活单位结算一次。海啸、地震、渡劫天雷都走这条路径。
+   * 目前只有一个演示用的天雷，将来由剧情系统触发。
+   */
+  async triggerStageEvent(def: StageEventDef): Promise<void> {
+    if (this.finished) throw new Error('战斗已经结束，不再触发剧情事件');
+
+    const targets = this.units.filter((unit) => isAlive(unit));
+    if (targets.length === 0) return;
+
+    this.logIt('phase', def.text);
+    await this.director?.onStageEvent?.(def, targets, this.battlefield.eventArea.center);
+
+    for (const target of targets) {
+      if (!isAlive(target)) continue;
+
+      if (def.damagePercent <= 0) {
+        await this.director?.onStrike?.({
+          attacker: undefined,
+          target,
+          damage: 0,
+          healing: 0,
+          crit: false,
+          defeated: false,
+          label: def.name,
+        });
+        continue;
+      }
+
+      const damage = Math.round(target.stats.maxHp * def.damagePercent);
+      const outcome = applyDamage(target, damage);
+
+      this.logIt('damage', `${target.name} 被「${def.name}」击中，受到 ${outcome.dealt} 点伤害`);
+      if (outcome.defeated) this.logIt('system', `${target.name} 倒下了`);
+
+      await this.director?.onStrike?.({
+        attacker: undefined,
+        target,
+        damage: outcome.dealt,
+        healing: 0,
+        crit: false,
+        defeated: outcome.defeated,
+        label: def.name,
+      });
+    }
+
+    this.finishIfOver();
+    this.events.emit('update', undefined);
   }
 
   /**

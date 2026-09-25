@@ -1,9 +1,19 @@
-import { getBattlefield, DEFAULT_BATTLEFIELD_ID } from '../shared/data/battlefields.ts';
+import { getBattlefield } from '../shared/data/battlefields.ts';
+import { getEnvironment, getWeather } from '../shared/data/environments.ts';
+import { getFormation } from '../shared/data/formations.ts';
 import { createSampleBattleUnits } from '../shared/data/sample-battle.ts';
-import type { ActiveStatus, BattleUnit, PendingAction } from '../shared/data/types.ts';
+import { getStageEvent } from '../shared/data/stage-events.ts';
+import type {
+  ActiveStatus,
+  BattleUnit,
+  PartyConfig,
+  PendingAction,
+  StageEventDef,
+} from '../shared/data/types.ts';
 import type {
   BattleRecord,
   BattleSnapshot,
+  Scenery,
   StatusSnapshot,
   UnitSnapshot,
 } from '../shared/protocol.ts';
@@ -67,17 +77,32 @@ class RecordingDirector implements BattleDirector {
     this.records.push({ kind: 'afterAction', actorId: actor.id });
   }
 
+  onStageEvent(
+    def: StageEventDef,
+    _targets: BattleUnit[],
+    anchor: { x: number; y: number; z: number },
+  ): void {
+    this.records.push({
+      kind: 'stageEvent',
+      eventId: def.id,
+      name: def.name,
+      text: def.text,
+      anchor: { ...anchor },
+    });
+  }
+
   /** 取出并清空 —— 每次同步只发「上次同步之后」新产生的事件。 */
   take(): BattleRecord[] {
-    const taken = this.records;
+    const records = this.records;
     this.records = [];
-    return taken;
+    return records;
   }
 }
 
 export interface SessionOptions {
   sessionId: string;
-  battlefieldId?: string;
+  /** 战斗外配好的队伍设置：阵法、战场、环境、天气，全在这里。 */
+  config: PartyConfig;
   seed?: number;
 }
 
@@ -90,22 +115,29 @@ export interface SessionOptions {
  */
 export class BattleSession {
   readonly id: string;
+  /** 开战时从队伍配置里读出来的那一份，战斗中不变。 */
+  readonly config: PartyConfig;
+
   private battle: Battle;
   private readonly director = new RecordingDirector();
   private busy = false;
 
-  private constructor(id: string, battle: Battle) {
+  private constructor(id: string, config: PartyConfig, battle: Battle) {
     this.id = id;
+    this.config = config;
     this.battle = battle;
     battle.director = this.director;
     battle.start();
   }
 
   static create(options: SessionOptions): BattleSession {
-    const battlefield = getBattlefield(options.battlefieldId ?? DEFAULT_BATTLEFIELD_ID);
+    const config = options.config;
+    const battlefield = getBattlefield(config.battlefieldId);
+    const formation = getFormation(config.formationId);
     const units = createSampleBattleUnits().map(createUnit);
-    const battle = new Battle({ units, battlefield, seed: options.seed });
-    return new BattleSession(options.sessionId, battle);
+
+    const battle = new Battle({ units, battlefield, formation, seed: options.seed });
+    return new BattleSession(options.sessionId, config, battle);
   }
 
   /** 对外状态快照。 */
@@ -115,10 +147,20 @@ export class BattleSession {
       phase: this.battle.phase,
       turn: this.battle.turn,
       battlefield: this.battle.battlefield,
-      units: this.battle.units.map(toUnitSnapshot),
+      formation: this.battle.formation,
+      scenery: this.scenery(),
+      units: this.battle.units.map((unit) => this.toUnitSnapshot(unit)),
       awaitingUnitIds: this.battle.awaitingUnits.map((unit) => unit.id),
       log: [...this.battle.log],
       result: this.battle.result,
+    };
+  }
+
+  /** 场景外观。服务端下发完整数据，客户端不必自己查表。 */
+  private scenery(): Scenery {
+    return {
+      environment: getEnvironment(this.config.environmentId),
+      weather: getWeather(this.config.weatherId),
     };
   }
 
@@ -130,12 +172,6 @@ export class BattleSession {
   // -------------------------------------------------------------------------
   // 玩家意图 —— 服务端校验后才会改变状态
   // -------------------------------------------------------------------------
-
-  /** 布阵阶段交换两个我方单位的站位。 */
-  swapPositions(unitAId: string, unitBId: string): void {
-    const ok = this.battle.swapPositions(unitAId, unitBId);
-    if (!ok) throw new Error('现在不能交换站位（只允许在布阵阶段调整我方单位）');
-  }
 
   async beginBattle(): Promise<void> {
     if (this.battle.phase !== 'deployment') throw new Error('当前不在布阵阶段');
@@ -155,35 +191,49 @@ export class BattleSession {
       this.busy = false;
     }
   }
-}
 
-// ---------------------------------------------------------------------------
-// Battle → 对外快照
-// ---------------------------------------------------------------------------
+  /** 手动触发一个剧情事件（目前只有演示用的天雷）。 */
+  async triggerEvent(eventId: string): Promise<void> {
+    if (this.busy) throw new Error('上一轮仍在结算中，请稍候');
 
-function toUnitSnapshot(unit: BattleUnit): UnitSnapshot {
-  const snapshot: UnitSnapshot = {
-    id: unit.id,
-    name: unit.name,
-    side: unit.side,
-    stats: { ...unit.stats },
-    position: { ...unit.position },
-    statuses: unit.statuses.map(toStatusSnapshot),
-    isDefending: unit.isDefending,
-    captured: unit.captured,
-    alive: isAlive(unit),
-    isPlayerControlled: unit.isPlayerControlled,
-  };
-
-  // 指令可用性在服务端算一次，客户端照着显示 —— 避免客户端自己推一份规则
-  if (unit.isPlayerControlled) {
-    snapshot.commands = COMMAND_ORDER.map((id) => {
-      const check = checkUsable(unit, getCommand(id));
-      return check.ok ? { id, ok: true } : { id, ok: false, reason: check.reason };
-    });
+    const def = getStageEvent(eventId);
+    this.busy = true;
+    try {
+      await this.battle.triggerStageEvent(def);
+    } finally {
+      this.busy = false;
+    }
   }
 
-  return snapshot;
+  // -------------------------------------------------------------------------
+
+  private toUnitSnapshot(unit: BattleUnit): UnitSnapshot {
+    const snapshot: UnitSnapshot = {
+      id: unit.id,
+      name: unit.name,
+      side: unit.side,
+      stats: { ...unit.stats },
+      position: { ...unit.position },
+      statuses: unit.statuses.map(toStatusSnapshot),
+      isDefending: unit.isDefending,
+      captured: unit.captured,
+      alive: isAlive(unit),
+      isPlayerControlled: unit.isPlayerControlled,
+    };
+
+    if (unit.isPlayerControlled) {
+      // 指令可用性在服务端算一次，客户端照着显示 —— 避免客户端自己推一份规则
+      snapshot.commands = COMMAND_ORDER.map((id) => {
+        const check = checkUsable(unit, getCommand(id));
+        return check.ok ? { id, ok: true } : { id, ok: false, reason: check.reason };
+      });
+
+      const slot = this.battle.formationSlotOf(unit.id);
+      if (slot) snapshot.formationRole = slot.role;
+    }
+
+    return snapshot;
+  }
 }
 
 function toStatusSnapshot(status: ActiveStatus): StatusSnapshot {

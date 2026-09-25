@@ -1,3 +1,7 @@
+import { listBattlefields } from '../../shared/data/battlefields.ts';
+import { listEnvironments, listWeathers } from '../../shared/data/environments.ts';
+import { listFormations } from '../../shared/data/formations.ts';
+import { DEMO_EVENT_ID } from '../../shared/data/stage-events.ts';
 import type { BattlePhase, CommandId, PendingAction, TerrainZone } from '../../shared/data/types.ts';
 import type { UnitSnapshot } from '../../shared/protocol.ts';
 import { COMMAND_ORDER, getCommand } from '../../shared/systems/battle/commands.ts';
@@ -31,19 +35,30 @@ const SPEED_PRESETS: ReadonlyArray<{ label: string; value: number }> = [
 const DEFAULT_SPEED = 2;
 const LOG_LIMIT = 80;
 
+/** 队伍配置的四个字段 —— 也就是战斗外能改的全部东西。 */
+export interface PartyConfigPatch {
+  formationId?: string;
+  battlefieldId?: string;
+  environmentId?: string;
+  weatherId?: string;
+}
+
 /** 界面能发起的意图。它们都会被转成协议消息发给服务端 —— 界面自己不改任何状态。 */
 export interface BattleViewActions {
-  onSwap: (unitAId: string, unitBId: string) => void;
   onBeginBattle: () => void;
   onSubmit: (actions: PendingAction[]) => void;
   onRestart: () => void;
+  /** 保存队伍配置（阵法 / 战场 / 环境 / 天气）并重开一局。 */
+  onSavePartyConfig: (patch: PartyConfigPatch) => void;
+  /** 手动触发一个剧情事件（演示用）。 */
+  onTriggerEvent: (eventId: string) => void;
 }
 
 /**
- * 战斗 HUD：顶栏、布阵面板 / 指令栏、日志。
+ * 战斗 HUD：顶栏、布阵面板 / 指令栏、日志、队伍配置弹窗。
  *
  * 它只读 BattleMirror 并把玩家意图交给 actions —— 既不推导战斗，也不保存状态。
- * 单位本身由 BattleStage 画在 3D 战场里，这里只把「当前谁能操作」同步过去做高亮。
+ * 单位与阵图由 BattleStage 画在 3D 战场里，这里只把「当前谁能操作」同步过去做高亮。
  */
 export class BattleView {
   private readonly root: HTMLElement;
@@ -52,12 +67,15 @@ export class BattleView {
 
   private readonly turnEl: HTMLElement;
   private readonly phaseEl: HTMLElement;
-  private readonly battlefieldEl: HTMLElement;
+  private readonly formationEl: HTMLElement;
+  private readonly sceneryEl: HTMLElement;
   private readonly connectionEl: HTMLElement;
   private readonly hintEl: HTMLElement;
   private readonly stageEl: HTMLElement;
   private readonly panelEl: HTMLElement;
   private readonly logEl: HTMLElement;
+  private readonly overlayEl: HTMLElement;
+  private readonly dialogEl: HTMLElement;
   private readonly speedButtons: HTMLElement[];
 
   private stage: BattleStage | undefined;
@@ -67,10 +85,11 @@ export class BattleView {
   private pending: PendingAction[] = [];
   private pickIndex = 0;
   private awaitingTarget: CommandId | null = null;
-  /** 布阵阶段已选中的第一个单位。 */
-  private swapSelection: string | null = null;
   private renderedLog = 0;
   private renderedSession = '';
+
+  /** 配置弹窗里未提交的选择。关闭时丢弃。 */
+  private draft: PartyConfigPatch = {};
 
   constructor(root: HTMLElement, mirror: BattleMirror, actions: BattleViewActions) {
     this.root = root;
@@ -86,9 +105,12 @@ export class BattleView {
         <header class="game__header">
           <span class="game__turn">连接中…</span>
           <span class="game__phase"></span>
-          <span class="game__battlefield"></span>
+          <span class="game__formation"></span>
+          <span class="game__scenery"></span>
           <span class="game__connection"></span>
+          <button type="button" class="game__event" title="演示：从上方事件区降下一道渡劫天雷">⚡ 天雷</button>
           <div class="game__speed" title="行动演出速度">${speedButtonsHtml}</div>
+          <button type="button" class="game__config">队伍配置</button>
           <button type="button" class="game__restart">重开一局</button>
         </header>
         <div class="game__stage"></div>
@@ -100,16 +122,22 @@ export class BattleView {
           <div class="game__hint"></div>
           <div class="game__panel"></div>
         </footer>
+      </div>
+      <div class="config-overlay" hidden>
+        <div class="config-dialog" role="dialog" aria-label="队伍配置"></div>
       </div>`;
 
     this.turnEl = pick(root, '.game__turn');
     this.phaseEl = pick(root, '.game__phase');
-    this.battlefieldEl = pick(root, '.game__battlefield');
+    this.formationEl = pick(root, '.game__formation');
+    this.sceneryEl = pick(root, '.game__scenery');
     this.connectionEl = pick(root, '.game__connection');
     this.stageEl = pick(root, '.game__stage');
     this.hintEl = pick(root, '.game__hint');
     this.panelEl = pick(root, '.game__panel');
     this.logEl = pick(root, '.game__log');
+    this.overlayEl = pick(root, '.config-overlay');
+    this.dialogEl = pick(root, '.config-dialog');
     this.speedButtons = [...root.querySelectorAll<HTMLElement>('.game__speed [data-speed]')];
 
     this.bindEvents();
@@ -138,12 +166,16 @@ export class BattleView {
     this.turnEl.textContent =
       mirror.phase === 'deployment' ? '布阵阶段' : `第 ${mirror.turn} 回合`;
     this.phaseEl.textContent = `阶段：${PHASE_LABELS[mirror.phase]}`;
-    this.battlefieldEl.textContent = mirror.battlefield?.name ?? '';
+    this.formationEl.textContent = mirror.formation ? `阵：${mirror.formation.name}` : '';
+    this.sceneryEl.textContent = mirror.scenery
+      ? `${mirror.scenery.environment.name} · ${mirror.scenery.weather.name}`
+      : '';
 
     this.renderHint();
     this.renderPanel();
     this.renderLog();
     this.renderSpeed();
+    this.renderDialog();
     this.syncStage();
   }
 
@@ -162,16 +194,9 @@ export class BattleView {
     this.hintEl.innerHTML = `<span class="hint hint--error">服务端拒绝：${escapeHtml(message)}</span>`;
   }
 
-  /** 3D 舞台的拾取回调：布阵阶段选人换位，指令阶段选目标。 */
+  /** 3D 舞台的拾取回调：只有选目标这一种用途了（站位由阵法定，不再点人换位）。 */
   pickUnit(unitId: string): void {
-    if (this.mirror.playing) return;
-
-    if (this.mirror.phase === 'deployment') {
-      this.selectForSwap(unitId);
-      return;
-    }
-
-    if (!this.awaitingTarget) return;
+    if (this.mirror.playing || !this.awaitingTarget) return;
 
     const unit = this.mirror.unitById(unitId);
     if (!unit || unit.side !== 'enemy' || !unit.alive) return;
@@ -195,13 +220,6 @@ export class BattleView {
         return;
       }
 
-      const swapButton = closestFrom(event, '[data-swap-unit]');
-      const swapId = swapButton?.dataset.swapUnit;
-      if (swapId) {
-        this.selectForSwap(swapId);
-        return;
-      }
-
       if (closestFrom(event, '[data-action="begin-battle"]')) {
         this.actions.onBeginBattle();
       }
@@ -222,8 +240,42 @@ export class BattleView {
       this.renderSpeed();
     });
 
+    pick(this.root, '.game__config').addEventListener('click', () => this.openConfig());
     pick(this.root, '.game__restart').addEventListener('click', () => {
       this.actions.onRestart();
+    });
+
+    pick(this.root, '.game__event').addEventListener('click', () => {
+      this.actions.onTriggerEvent(DEMO_EVENT_ID);
+    });
+
+    // 弹窗：选项点击与底部按钮都走委托
+    this.overlayEl.addEventListener('click', (event) => {
+      if (event.target === this.overlayEl) {
+        this.closeConfig();
+        return;
+      }
+
+      const option = closestFrom(event, '[data-config-field]');
+      if (option) {
+        const field = option.dataset.configField as keyof PartyConfigPatch | undefined;
+        const value = option.dataset.configValue;
+        if (field && value) {
+          this.draft = { ...this.draft, [field]: value };
+          this.renderDialog();
+        }
+        return;
+      }
+
+      if (closestFrom(event, '[data-action="config-close"]')) {
+        this.closeConfig();
+        return;
+      }
+
+      if (closestFrom(event, '[data-action="config-apply"]')) {
+        this.actions.onSavePartyConfig(this.draft);
+        this.closeConfig();
+      }
     });
   }
 
@@ -259,27 +311,6 @@ export class BattleView {
     }
   }
 
-  /** 布阵换位：点第一个选中，点第二个就提交交换。 */
-  private selectForSwap(unitId: string): void {
-    if (this.mirror.phase !== 'deployment' || this.mirror.playing) return;
-
-    if (this.swapSelection === unitId) {
-      this.swapSelection = null;
-      this.refresh();
-      return;
-    }
-
-    if (!this.swapSelection) {
-      this.swapSelection = unitId;
-      this.refresh();
-      return;
-    }
-
-    const first = this.swapSelection;
-    this.swapSelection = null;
-    this.actions.onSwap(first, unitId);
-  }
-
   private unitsToCommand(): UnitSnapshot[] {
     return this.mirror.awaitingUnits;
   }
@@ -305,6 +336,88 @@ export class BattleView {
   }
 
   // -------------------------------------------------------------------------
+  // 队伍配置弹窗
+  // -------------------------------------------------------------------------
+
+  private openConfig(): void {
+    // 以当前生效的配置为草稿起点
+    const mirror = this.mirror;
+    this.draft = {
+      formationId: mirror.formation?.id,
+      battlefieldId: mirror.battlefield?.id,
+      environmentId: mirror.scenery?.environment.id,
+      weatherId: mirror.scenery?.weather.id,
+    };
+    this.overlayEl.hidden = false;
+    this.renderDialog();
+  }
+
+  private closeConfig(): void {
+    this.overlayEl.hidden = true;
+    this.draft = {};
+  }
+
+  /**
+   * 配置弹窗。
+   *
+   * 这些是**战斗外**的设定，所以改动不能热应用 —— 点「应用并重开一局」会换一场仗。
+   * 将来它会被菜单里的设置页取代，这里只是临时入口。
+   */
+  private renderDialog(): void {
+    if (this.overlayEl.hidden) return;
+
+    const current = { ...this.configFromMirror(), ...this.draft };
+
+    const section = (
+      title: string,
+      field: keyof PartyConfigPatch,
+      options: ReadonlyArray<{ id: string; name: string; desc: string }>,
+    ): string => `
+      <section class="config-section">
+        <h3>${title}</h3>
+        <div class="config-options">
+          ${options
+            .map(
+              (option) => `
+            <button type="button"
+                    class="config-option${current[field] === option.id ? ' is-on' : ''}"
+                    data-config-field="${field}"
+                    data-config-value="${escapeHtml(option.id)}"
+                    title="${escapeHtml(option.desc)}">
+              <span class="config-option__name">${escapeHtml(option.name)}</span>
+              <span class="config-option__desc">${escapeHtml(option.desc)}</span>
+            </button>`,
+            )
+            .join('')}
+        </div>
+      </section>`;
+
+    this.dialogEl.innerHTML = `
+      <header class="config-dialog__head">
+        <h2>队伍配置</h2>
+        <p>阵法与场景都是战斗外的设定 —— 应用之后会按新配置重开一局。</p>
+      </header>
+      ${section('我方阵法', 'formationId', listFormations())}
+      ${section('战场', 'battlefieldId', listBattlefields())}
+      ${section('环境', 'environmentId', listEnvironments())}
+      ${section('天气', 'weatherId', listWeathers())}
+      <footer class="config-dialog__foot">
+        <button type="button" data-action="config-close">取消</button>
+        <button type="button" class="is-primary" data-action="config-apply">应用并重开一局</button>
+      </footer>`;
+  }
+
+  private configFromMirror(): PartyConfigPatch {
+    const mirror = this.mirror;
+    return {
+      formationId: mirror.formation?.id,
+      battlefieldId: mirror.battlefield?.id,
+      environmentId: mirror.scenery?.environment.id,
+      weatherId: mirror.scenery?.weather.id,
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // 渲染
   // -------------------------------------------------------------------------
 
@@ -312,11 +425,11 @@ export class BattleView {
     const mirror = this.mirror;
 
     if (mirror.phase === 'deployment') {
-      const selected = this.swapSelection ? this.mirror.unitById(this.swapSelection) : undefined;
-      return void (this.hintEl.innerHTML = selected
-        ? `<span class="hint">已选中 <b>${escapeHtml(selected.name)}</b> —— 再点一个我方角色与之交换站位</span>
-           <button type="button" class="hint__cancel" data-action="cancel-target">取消</button>`
-        : `<span class="hint">布阵：点击两个我方角色交换站位。地形效果按站位生效，注意别让脆皮站进危险区。</span>`);
+      const formation = mirror.formation;
+      this.hintEl.innerHTML = `<span class="hint">布阵：当前摆的是「<b>${escapeHtml(
+        formation?.name ?? '无阵',
+      )}</b>」。阵位与地形效果都标在场上了 —— 要换阵法或场景，点右上角「队伍配置」。</span>`;
+      return;
     }
 
     if (mirror.playing) {
@@ -356,11 +469,11 @@ export class BattleView {
     }
 
     const total = this.unitsToCommand().length;
-    this.hintEl.innerHTML = `<span class="hint">轮到 <b>${escapeHtml(actor.name)}</b> 下达指令（${this.pickIndex + 1} / ${total}）</span>`;
+    const role = actor.formationRole ? `（${escapeHtml(actor.formationRole)}）` : '';
+    this.hintEl.innerHTML = `<span class="hint">轮到 <b>${escapeHtml(actor.name)}</b>${role} 下达指令（${this.pickIndex + 1} / ${total}）</span>`;
   }
 
   private renderPanel(): void {
-    // 两种形态切换靠修饰类：指令栏是九列网格，布阵面板是另一套布局
     if (this.mirror.phase === 'deployment') {
       this.panelEl.className = 'game__panel game__panel--deploy';
       this.panelEl.innerHTML = this.renderDeployPanel();
@@ -371,19 +484,24 @@ export class BattleView {
     this.panelEl.innerHTML = this.renderCommands();
   }
 
-  /** 布阵面板：列出我方单位与所在地形，点两下交换。 */
+  /**
+   * 布阵面板：把阵法、阵位与落点一次摊开给玩家看。
+   * 站位由阵法定死，这里不再是可操作项 —— 想调整只能回去换阵法。
+   */
   private renderDeployPanel(): string {
-    const chips = this.mirror.deployableUnits
+    const formation = this.mirror.formation;
+
+    const rows = this.mirror.allies
       .map((unit) => {
         const zone = this.zoneOf(unit);
-        const selected = this.swapSelection === unit.id ? ' is-selected' : '';
         const zoneText = zone ? escapeHtml(zone.name) : '普通地面';
-        const zoneClass = zone ? ` unit-chip__zone--${zone.kind}` : '';
+        const zoneClass = zone ? ` zone-tag--${zone.kind}` : '';
         return `
-          <button type="button" class="unit-chip${selected}" data-swap-unit="${escapeHtml(unit.id)}">
-            <span class="unit-chip__name">${escapeHtml(unit.name)}</span>
-            <span class="unit-chip__zone${zoneClass}">${zoneText}</span>
-          </button>`;
+          <li class="deploy__unit">
+            <span class="deploy__role">${escapeHtml(unit.formationRole ?? '—')}</span>
+            <span class="deploy__name">${escapeHtml(unit.name)}</span>
+            <span class="zone-tag${zoneClass}">${zoneText}</span>
+          </li>`;
       })
       .join('');
 
@@ -396,7 +514,11 @@ export class BattleView {
 
     return `
       <div class="deploy">
-        <div class="deploy__units">${chips}</div>
+        <div class="deploy__head">
+          <span class="deploy__formation">阵：${escapeHtml(formation?.name ?? '无阵')}</span>
+          <span class="deploy__desc">${escapeHtml(formation?.desc ?? '')}</span>
+        </div>
+        <ul class="deploy__units">${rows}</ul>
         <button type="button" class="deploy__start" data-action="begin-battle">开始战斗</button>
       </div>
       <ul class="deploy__zones">${zones}</ul>`;
@@ -473,15 +595,9 @@ export class BattleView {
     const canLook = idle && (mirror.phase === 'deployment' || mirror.phase === 'commandInput');
     stage.setInteractive(canLook);
 
-    if (idle && mirror.phase === 'deployment') {
-      stage.setPickMode('ally');
-    } else if (idle && this.awaitingTarget) {
-      stage.setPickMode('enemy');
-    } else {
-      stage.setPickMode('none');
-    }
-
-    stage.setActiveUnit(this.currentUnit()?.id ?? this.swapSelection ?? undefined);
+    // 只剩「选目标」一种拾取用途了 —— 布阵阶段不点人
+    stage.setPickMode(idle && this.awaitingTarget ? 'enemy' : 'none');
+    stage.setActiveUnit(this.currentUnit()?.id);
   }
 }
 

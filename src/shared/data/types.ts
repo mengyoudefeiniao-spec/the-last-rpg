@@ -95,7 +95,7 @@ export interface BattleUnitInit {
   stats: Partial<Stats> & Pick<Stats, 'maxHp' | 'maxMp' | 'maxSp'>;
   /** 开场自带的状态。 */
   statuses?: StatusDef[];
-  /** 初始站位。服务端布阵时会按战场槽位分配或改写它。 */
+  /** 初始站位。服务端开战时按阵位分派，这里给的会被覆盖。 */
   position?: BattlePosition;
 }
 
@@ -118,6 +118,112 @@ export interface BattleUnit {
   isPlayerControlled: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// 阵法 —— 只作用于我方
+// ---------------------------------------------------------------------------
+
+/** 阵位：一个落点，以及它在这个阵法里的角色名。 */
+export interface FormationSlot {
+  x: number;
+  z: number;
+  /** 阵位名，如「锋头」「中军」「左翼尖」。 */
+  role: string;
+}
+
+/** 阵图上的一条连线，按阵位索引连接两点。纯表现，不参与规则。 */
+export interface FormationLink {
+  from: number;
+  to: number;
+}
+
+/**
+ * 阵法。
+ *
+ * **只作用于我方** —— 敌方不设阵法，用的是战场自带的 enemySlots。
+ * 阵法是**战斗外**的配置（队伍配置的一部分），开战时才被读取来分派站位，
+ * 战斗中不能更换，也不能在布阵阶段把阵位换掉。
+ *
+ * 目前的阵法只决定「站哪」，还没有数值加成；将来若要加，在这里补一个 effects 字段即可。
+ */
+export interface Formation {
+  id: string;
+  name: string;
+  desc: string;
+  /** 阵位，按顺序对应我方第 1..N 号位。 */
+  slots: FormationSlot[];
+  /** 阵图连线，渲染层据此画出阵图。 */
+  links: FormationLink[];
+  /** 阵图配色。 */
+  color: number;
+}
+
+// ---------------------------------------------------------------------------
+// 场景外观 —— 不影响战斗规则，只影响观感
+// ---------------------------------------------------------------------------
+
+/** 环境主题：天空、雾气、光照、地面。 */
+export interface EnvironmentTheme {
+  id: string;
+  name: string;
+  desc: string;
+  /** 背景 / 远景色。 */
+  sky: number;
+  fog: number;
+  fogNear: number;
+  fogFar: number;
+  /** 地面主色。 */
+  ground: number;
+  gridMajor: number;
+  gridMinor: number;
+  keyLight: number;
+  keyIntensity: number;
+  hemiSky: number;
+  hemiGround: number;
+  /** 主光方向，决定影子的斜度。 */
+  keyDirection: [number, number, number];
+}
+
+/** 天气的种类，决定粒子怎么动。 */
+export type WeatherKind = 'clear' | 'snow' | 'rain' | 'sand' | 'mist';
+
+/** 天气预设：叠在环境之上的粒子效果。 */
+export interface WeatherPreset {
+  id: string;
+  name: string;
+  desc: string;
+  kind: WeatherKind;
+  /** 粒子数量，0 表示不放粒子。 */
+  density: number;
+  color: number;
+  /** 下落速度（单位/秒），负值表示上浮。 */
+  fallSpeed: number;
+  /** 横向风速，决定粒子的斜度。 */
+  drift: number;
+  /** 粒子大小。 */
+  size: number;
+}
+
+/**
+ * 战场上方的事件区 —— **目前完全不渲染**。
+ *
+ * 预留给剧情事件：海啸（自远处涌来）、地震（地面震裂）、渡劫天雷（自天而降）之类。
+ * 现在只提供一个位置锚点与触发接口，等剧情系统来了直接往上接。
+ */
+export interface StageEventArea {
+  /** 区域中心，位于战场正上方。 */
+  center: { x: number; y: number; z: number };
+  /** 水平半径。 */
+  radius: number;
+  /** 垂直厚度。 */
+  height: number;
+  /** 这块区域预留给什么，给后来的人看。 */
+  note: string;
+}
+
+// ---------------------------------------------------------------------------
+// 地形与战场
+// ---------------------------------------------------------------------------
+
 /** 地形分区的视觉/语义类别，渲染层据此上色。 */
 export type TerrainKind = 'snow' | 'flame' | 'spring' | 'miasma';
 
@@ -138,17 +244,69 @@ export interface TerrainZone {
   desc: string;
 }
 
-/** 一份战场定义：双方阵型槽位 + 地形分区。 */
+/**
+ * 一份战场定义：敌方阵位 + 地形分区 + 上方事件区。
+ *
+ * 注意这里**没有我方阵位** —— 我方的站位由阵法（Formation）决定，
+ * 所以换一个阵法，同一张战场上的地形取舍就完全不同。
+ */
 export interface Battlefield {
   id: string;
   name: string;
   desc: string;
-  /** 我方阵型槽位。布阵阶段在这些槽位之间交换站位。 */
-  allySlots: BattlePosition[];
-  /** 敌方阵型槽位。 */
+  /** 敌方阵型槽位。敌方不设阵法，用战场自带的这一套。 */
   enemySlots: BattlePosition[];
   zones: TerrainZone[];
+  /** 上方的事件区（预留，不渲染）。 */
+  eventArea: StageEventArea;
 }
+
+// ---------------------------------------------------------------------------
+// 战斗外配置
+// ---------------------------------------------------------------------------
+
+/**
+ * 战斗外配好的「队伍出战设置」。
+ *
+ * 存在服务端（见 src/server/party-config.ts），开战时读取。
+ * 将来它会由菜单里的设置页写入 —— 现在先用顶栏的临时入口代替。
+ */
+export interface PartyConfig {
+  /** 我方阵法。 */
+  formationId: string;
+  /** 战场（决定地形）。 */
+  battlefieldId: string;
+  /** 场景外观 —— 下面两项只管观感。 */
+  environmentId: string;
+  weatherId: string;
+}
+
+// ---------------------------------------------------------------------------
+// 剧情事件
+// ---------------------------------------------------------------------------
+
+/**
+ * 剧情级事件的定义。
+ *
+ * 这类事件不属于任何单位，而是「发生在战场上」的 —— 从上方的事件区降临。
+ * 海啸、地震、渡劫天雷都是这一类。damagePercent 为 0 时是纯演出。
+ */
+export interface StageEventDef {
+  id: string;
+  name: string;
+  desc: string;
+  /** 演出与日志用的文案。 */
+  text: string;
+  /** 按目标最大生命的百分比结算伤害；0 表示纯演出。 */
+  damagePercent: number;
+  kind: DamageKind;
+  /** 演出配色。 */
+  color: number;
+}
+
+// ---------------------------------------------------------------------------
+// 指令与阶段
+// ---------------------------------------------------------------------------
 
 /** 九种战斗指令。 */
 export type CommandId =
@@ -195,7 +353,7 @@ export interface PendingAction {
  *      → bothSidesAction → actionEnd → 下一回合。
  */
 export type BattlePhase =
-  /** 布阵：只有这阶段能调整站位，也允许自由观察战场。 */
+  /** 布阵：预览阵法、地形与场景，确认后开战。站位由阵法决定，此处不可更改。 */
   | 'deployment'
   | 'turnStart'
   | 'commandInput'
