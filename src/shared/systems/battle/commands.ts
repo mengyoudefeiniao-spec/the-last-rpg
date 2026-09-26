@@ -32,6 +32,18 @@ const COMMAND_DEFS = {
     cost: { sp: 30 },
     resolvesImmediately: false,
   },
+  useItem: {
+    id: 'useItem',
+    label: '道具',
+    desc: '使用一件道具。道具全是单体，只能给自己人用。',
+    requiresTarget: true,
+    // 和攻击类相反：目标在自己这边
+    targetSide: 'ally',
+    // 点它会先展开二级菜单挑道具
+    needsItem: true,
+    cost: {},
+    resolvesImmediately: false,
+  },
   talisman: {
     id: 'talisman',
     label: '法宝',
@@ -96,6 +108,7 @@ export const COMMAND_ORDER: readonly CommandId[] = [
   'attack',
   'spell',
   'skill',
+  'useItem',
   'talisman',
   'spiritTreasure',
   'summon',

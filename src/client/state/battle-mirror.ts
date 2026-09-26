@@ -1,10 +1,16 @@
 import { BALANCE } from '../../shared/config/balance.ts';
+
+/** 对齐偏差用多久化掉（秒）。太短等于没做，太长会看着发飘。 */
+const GAUGE_SETTLE_SECONDS = 0.45;
+/** 偏差限幅：超过这么多就不平滑了，直接跳 —— 换局、复活这类真落差该干脆。 */
+const GAUGE_SHIFT_LIMIT = 8;
 import type {
   Battlefield,
   BattleLogEntry,
   BattlePhase,
   BattleResult,
   Formation,
+  ItemStack,
 } from '../../shared/data/types.ts';
 import type {
   BattleRecord,
@@ -32,6 +38,8 @@ export class BattleMirror {
   scenery: Scenery | null = null;
   units: UnitSnapshot[] = [];
   awaitingUnitIds: string[] = [];
+  /** 队伍共用的道具池。全队一份，不是每人一个背包。 */
+  items: ItemStack[] = [];
   log: BattleLogEntry[] = [];
   result: BattleResult | null = null;
 
@@ -51,10 +59,18 @@ export class BattleMirror {
    * 服务端每 100ms 才报一次，照它直接画的话条会一跳一跳；
    * 所以记下「上次收到的值 + 收到的时刻」，渲染时按 gaugePerSecond 往前推。
    * 这只是表现层的补间 —— 谁该行动永远由服务端说了算。
+   *
+   * `shift` 是上一次对齐时欠下的偏差：心跳间隔本身有抖动，硬贴着真实值跳
+   * 会看见「一顿一顿」。所以把差额记下来，交给后面半秒慢慢化掉。
    */
-  private readonly gaugeBase = new Map<string, { value: number; at: number }>();
+  private readonly gaugeBase = new Map<
+    string,
+    { value: number; at: number; shift: number }
+  >();
 
   applySnapshot(snapshot: BattleSnapshot): void {
+    const isNewSession = snapshot.sessionId !== this.sessionId;
+
     this.sessionId = snapshot.sessionId;
     this.phase = snapshot.phase;
     this.round = snapshot.round;
@@ -62,7 +78,13 @@ export class BattleMirror {
     this.formation = snapshot.formation;
     this.scenery = snapshot.scenery;
     this.units = snapshot.units;
-    this.awaitingUnitIds = snapshot.awaitingUnitIds;
+    this.items = snapshot.items;
+
+    // 「谁在等指令」这份名单**只由心跳维护**。
+    // 快照是服务端产出演出剧本那一刻生成的，而演出期间时间还在往前走 ——
+    // 拿它盖回来，就会把演出中新到点的单位抹掉，指令栏于是再也不肯亮。
+    if (isNewSession) this.awaitingUnitIds = snapshot.awaitingUnitIds;
+
     this.log = snapshot.log;
     this.result = snapshot.result;
     this.hpOverride.clear();
@@ -81,8 +103,34 @@ export class BattleMirror {
     }
   }
 
+  /**
+   * 记下一个单位的新行动值。
+   *
+   * 两条规矩，都是为了让条看着稳：
+   * 1. 小幅回退不认 —— 那是心跳间隔抖动，不是真的退回去了；
+   * 2. 与当前显示值的差额存进 `shift`，交给后面慢慢化掉，而不是当场跳过去。
+   */
   private markGauge(unitId: string, value: number): void {
-    this.gaugeBase.set(unitId, { value, at: performance.now() });
+    const now = performance.now();
+    const previous = this.gaugeBase.get(unitId);
+
+    if (previous && value < previous.value && previous.value - value < BALANCE.gaugeMax * 0.5) {
+      return;
+    }
+
+    const speed = this.unitById(unitId)?.gaugePerSecond ?? 0;
+
+    // 不校正的话，此刻屏幕上画到哪里
+    const shown = previous
+      ? previous.value +
+        speed * ((now - previous.at) / 1000) +
+        previous.shift * Math.max(0, 1 - (now - previous.at) / 1000 / GAUGE_SETTLE_SECONDS)
+      : value;
+
+    // 偏差限幅：真出现大落差（换局、复活），那就该干脆地跳，别拖泥带水
+    const shift = Math.max(-GAUGE_SHIFT_LIMIT, Math.min(GAUGE_SHIFT_LIMIT, shown - value));
+
+    this.gaugeBase.set(unitId, { value, at: now, shift });
   }
 
   /**
@@ -95,12 +143,24 @@ export class BattleMirror {
     const base = this.gaugeBase.get(unit.id);
     if (!base) return unit.gauge;
 
-    // 有人在等我方指令时，整个战场的时间是停的 —— 插值也得跟着停，
-    // 否则条会自己往前爬，看起来就像「敌方趁你思考时偷偷在攒」。
-    if (this.awaitingUnitIds.length > 0) return base.value;
+    /*
+     * 两种情况条都该是死的，不插值：
+     * - 布阵阶段：服务端这时不推进，客户端要是自己往前爬，每来一次心跳就被打回 0，
+     *   看着就是「爬一下、弹回去」地抖；
+     * - 有人在等我方指令：整个战场的时间停住。
+     */
+    if (this.phase !== 'battle' || this.awaitingUnitIds.length > 0) return base.value;
 
     const elapsed = (performance.now() - base.at) / 1000;
-    return Math.min(BALANCE.gaugeMax, base.value + unit.gaugePerSecond * elapsed);
+    const settle = Math.max(0, 1 - elapsed / GAUGE_SETTLE_SECONDS);
+
+    return Math.max(
+      0,
+      Math.min(
+        BALANCE.gaugeMax,
+        base.value + unit.gaugePerSecond * elapsed + base.shift * settle,
+      ),
+    );
   }
 
   /** 播放一条演出记录时的即时反应。 */

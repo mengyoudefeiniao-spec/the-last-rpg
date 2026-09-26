@@ -93,6 +93,15 @@ const STATUS_DEFS = {
     trigger: 'turnStart',
     desc: '速度 +40%',
   },
+  resUp: {
+    id: 'resUp',
+    name: '护法',
+    kind: 'buff',
+    duration: 3,
+    modifiers: { res: 0.4 },
+    trigger: 'turnStart',
+    desc: '法术抗性 +40%',
+  },
   regen: {
     id: 'regen',
     name: '回春',

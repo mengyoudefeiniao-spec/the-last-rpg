@@ -294,15 +294,11 @@ body {
   color: var(--enemy);
 }
 
-/* ---- 底部面板：指令栏 或 布阵面板，二选一 ---- */
+/* ---- 底部面板：现在只剩布阵面板 ---- */
 
 .game__panel {
   display: grid;
   gap: 6px;
-}
-
-.game__panel--commands {
-  grid-template-columns: repeat(9, minmax(0, 1fr));
 }
 
 .game__panel--deploy {
@@ -310,13 +306,111 @@ body {
   gap: 8px;
 }
 
+/* ---------------------- 指令栏（独立浮层，右侧偏下） ---------------------- */
+
+/*
+ * 刻意**不依附行动条**：位置、显隐都是它自己的事。
+ * 摆在战场右侧偏下 —— 上面留给右上角的行动条，左边避开左下角的敌阵，
+ * 也不至于压住右下角我方的阵形。
+ */
+.stage-actions {
+  position: absolute;
+  right: 16px;
+  bottom: 72px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 330px;
+  padding: 8px 10px 10px;
+  background: rgba(8, 12, 20, 0.76);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  /*
+   * 必须限高：二级菜单一展开就是十几条，不加限制会从顶部溢出到顶栏底下，
+   * 后面的条目既点不到也看不见。上面留 150px 给行动条与它的开关。
+   */
+  max-height: calc(100% - 150px);
+  overflow-y: auto;
+}
+
+/* 滚动条做窄一点，别在浮层里显得突兀 */
+.stage-actions::-webkit-scrollbar {
+  width: 6px;
+}
+
+.stage-actions::-webkit-scrollbar-thumb {
+  background: rgba(150, 180, 220, 0.3);
+  border-radius: 3px;
+}
+
+.stage-actions[hidden] {
+  display: none;
+}
+
+.stage-actions__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 3px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+
+/* 面板头右上角写清「这是给谁下的指令」，省得看错人 */
+.stage-actions__who {
+  font-size: 11.5px;
+  letter-spacing: 0;
+  color: #ffd479;
+}
+
+/* --------------------- 指令栏的二级菜单：挑道具 --------------------- */
+
+.submenu__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 2px 3px;
+}
+
+.submenu__back {
+  padding: 2px 8px;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11.5px;
+}
+
+.submenu__back:hover {
+  color: #ffd479;
+  border-color: rgba(255, 212, 121, 0.6);
+}
+
+.submenu__title {
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+
+/* 二级那些按钮往外缩一点，一眼能看出是「挂在上面那条指令底下」的 */
+.cmd--sub {
+  margin-left: 10px;
+  border-left: 2px solid rgba(78, 201, 176, 0.5);
+}
+
 /* ------------------------------- 指令 ------------------------------- */
 
 .cmd {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 7px 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
   color: var(--text);
   text-align: left;
   background: var(--panel);
@@ -652,7 +746,7 @@ body {
 /* 叠在 3D 战场的右上角 —— 它属于画面，不属于日志区。 */
 .turn-order {
   position: absolute;
-  top: 10px;
+  top: 38px;
   right: 10px;
   z-index: 5;
   width: 330px;
@@ -727,6 +821,13 @@ body {
   box-shadow: 0 0 0 2px #ffd479, 0 0 14px rgba(255, 212, 121, 0.9);
 }
 
+/* 鼠标正指着谁 —— 一圈青色，和「条满」的金色分得开 */
+.turn-chip.is-target {
+  outline: 2px solid #4ec9b0;
+  outline-offset: 2px;
+  box-shadow: 0 0 12px rgba(78, 201, 176, 0.85);
+}
+
 .turn-chip.is-down {
   opacity: 0.3;
 }
@@ -736,11 +837,208 @@ body {
 .waiting {
   display: grid;
   place-items: center;
-  min-height: 48px;
-  grid-column: 1 / -1;
+  padding: 14px 12px;
   color: var(--text-dim);
-  font-size: 13px;
-  background: var(--panel);
+  font-size: 12.5px;
+  text-align: center;
+  background: rgba(8, 12, 20, 0.82);
   border: 1px dashed var(--line);
   border-radius: 6px;
+}
+
+/* --------------------- 行动条开关（右上角，独立一行） --------------------- */
+
+.stage-tools {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+  display: flex;
+  gap: 6px;
+}
+
+.stage-tools__toggle {
+  padding: 4px 10px;
+  color: var(--text-dim);
+  background: rgba(8, 12, 20, 0.76);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.stage-tools__toggle:hover {
+  color: #ffd479;
+  border-color: rgba(255, 212, 121, 0.6);
+}
+
+/* ============================ 下方角色栏 ============================ */
+
+/*
+ * 一级到底：五张卡，每张自带名字、阵位、三条状态槽与身上的状态。
+ * 不做第二级展开 —— 战斗中没工夫点开再收起，来回切也看不清。
+ */
+.party {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.party:empty {
+  display: none;
+}
+
+.party__slot {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 9px;
+  align-items: center;
+  padding: 7px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/*
+ * 轮到它行动：金边 + 呼吸。
+ * 和场上它头顶那枚旋转的八面体是同一个金、同一个含义。
+ */
+.party__slot.is-active {
+  border-color: #ffd479;
+  animation: party-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes party-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgba(255, 212, 121, 0.45), 0 0 10px rgba(255, 212, 121, 0.18);
+  }
+  50% {
+    box-shadow: 0 0 0 1px rgba(255, 212, 121, 0.9), 0 0 18px rgba(255, 212, 121, 0.42);
+  }
+}
+
+.party__slot.is-down {
+  opacity: 0.42;
+  filter: grayscale(0.7);
+}
+
+.party__portrait {
+  grid-row: 1 / -1;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  background: linear-gradient(160deg, #2a3a52, #16202e);
+  border: 1px solid rgba(150, 180, 220, 0.35);
+  font-size: 18px;
+  font-weight: 700;
+  color: #cfe4ff;
+}
+
+.party__slot.is-active .party__portrait {
+  border-color: #ffd479;
+  color: #ffd479;
+}
+
+.party__info {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.party__name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.party__role {
+  min-width: 0;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 生命 / 法力 / 愤怒：标签 + 长条 + 数值，三样都得看得清 */
+.party__stats {
+  display: grid;
+  gap: 3px;
+  grid-column: 2;
+}
+
+.party__stat {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 60px;
+  align-items: center;
+  gap: 7px;
+}
+
+.party__stat-label {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.party__bar {
+  position: relative;
+  height: 7px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+
+/* 只在收到快照时更新，所以补间交给 CSS，别在 JS 里每帧算 */
+.party__bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.18s linear;
+}
+
+.party__bar-fill--hp { background: linear-gradient(90deg, #4f8f58, #9ade7b); }
+.party__bar-fill--mp { background: linear-gradient(90deg, #3f75b8, #74b9ff); }
+.party__bar-fill--sp { background: linear-gradient(90deg, #b8763a, #ffd479); }
+
+.party__stat-value {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 身上的状态。空的时候整行收掉，别留一段空白把卡片撑高。 */
+.party__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  grid-column: 2;
+}
+
+.party__flags:empty {
+  display: none;
+}
+
+.party__flag {
+  padding: 1px 7px;
+  font-size: 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.party__flag--debuff {
+  color: #ffb3ad;
+  background: rgba(224, 108, 117, 0.16);
+  border-color: rgba(224, 108, 117, 0.45);
+}
+
+.party__flag--buff {
+  color: #9fe8d6;
+  background: rgba(78, 201, 176, 0.16);
+  border-color: rgba(78, 201, 176, 0.45);
 }

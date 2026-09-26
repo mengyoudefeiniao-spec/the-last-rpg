@@ -77,6 +77,8 @@ function handleConnection(socket: WebSocket): void {
   /** 这条连接对应的会话句柄 —— 权威状态在服务端，客户端手里只是投影。 */
   let session: BattleSession | null = null;
   let tickTimer: ReturnType<typeof setInterval> | undefined;
+  /** 上一拍的时刻 —— 用来算「这一拍到底过了多久」。 */
+  let lastBeatAt = 0;
 
   const send = (message: ServerMessage): void => {
     if (socket.readyState === socket.OPEN) {
@@ -113,7 +115,13 @@ function handleConnection(socket: WebSocket): void {
     send({ type: 'tick', tick: session.tick() });
   };
 
-  /** 一个节拍：推进行动条；有新记录就顺带给客户端去演。 */
+  /**
+   * 一个节拍：推进行动条；有新记录就顺带给客户端去演。
+   *
+   * 推进量取**真实经过的时间**，而不是固定的 TICK_MS —— `setInterval` 在 Node 里
+   * 是会漂移的（撞上 GC 尤其明显）。拿固定值喂，行动条整体就会偏快或偏慢，
+   * 客户端只好一直往回校正，表现出来就是条在抖。
+   */
   const beat = async (): Promise<void> => {
     if (!session) return;
 
@@ -122,8 +130,13 @@ function handleConnection(socket: WebSocket): void {
       return;
     }
 
+    const now = performance.now();
+    // 万一卡了很久，别一口气补那么多时间 —— 一拍最多补四拍的量
+    const dt = Math.min(now - lastBeatAt, TICK_MS * 4);
+    lastBeatAt = now;
+
     try {
-      await session.advance(TICK_MS);
+      await session.advance(dt);
     } catch (error) {
       fail(error);
       return;
@@ -140,12 +153,11 @@ function handleConnection(socket: WebSocket): void {
 
   function startTicking(): void {
     if (tickTimer !== undefined) return;
+    lastBeatAt = performance.now();
     tickTimer = setInterval(() => {
       void beat();
     }, TICK_MS);
-  }
-
-  function stopTicking(): void {
+  }  function stopTicking(): void {
     if (tickTimer === undefined) return;
     clearInterval(tickTimer);
     tickTimer = undefined;

@@ -6,10 +6,28 @@
  * 任一退出就一起收摊。服务端用 Node 内置的类型剥离跑 .ts，不需要额外构建。
  */
 import { spawn } from 'node:child_process';
+import { resolve } from 'node:path';
 
+/*
+ * 直接跑各自的入口，**不走 npx、不开 shell**。
+ *
+ * 在 Windows 上 npx 是 .cmd，非得 shell: true 才执行得了；而一旦开 shell，
+ * Node 会把 args 直接拼进命令行（不做转义），于是触发 DEP0190 警告。
+ * 绕开它最简单：用 process.execPath（就是当前这个 node）+ 脚本路径。
+ */
 const SPECS = [
-  { name: 'vite', color: '\u001b[36m', command: 'npx', args: ['vite'] },
-  { name: 'server', color: '\u001b[35m', command: 'node', args: ['src/server/index.ts'] },
+  {
+    name: 'vite',
+    color: '\u001b[36m',
+    command: process.execPath,
+    args: [resolve('node_modules/vite/bin/vite.js')],
+  },
+  {
+    name: 'server',
+    color: '\u001b[35m',
+    command: process.execPath,
+    args: [resolve('src/server/index.ts')],
+  },
 ];
 
 const children = [];
@@ -18,16 +36,28 @@ let shuttingDown = false;
 function shutdown(code) {
   if (shuttingDown) return;
   shuttingDown = true;
+
   for (const child of children) {
-    if (!child.killed) child.kill();
+    if (child.killed || child.pid === undefined) continue;
+
+    if (process.platform === 'win32') {
+      /*
+       * Windows 上 kill() 只送得到直接子进程，孙子进程（vite 自己 fork 的
+       * esbuild 之类）会留在原地占着端口 —— 下次启动就 EADDRINUSE。
+       * taskkill /T 连整棵进程树一起收，才是干净的做法。
+       */
+      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      child.kill();
+    }
   }
+
   process.exit(code);
 }
 
 for (const spec of SPECS) {
   const child = spawn(spec.command, spec.args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    shell: process.platform === 'win32',
     env: process.env,
   });
 

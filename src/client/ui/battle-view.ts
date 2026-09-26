@@ -1,5 +1,6 @@
 import { listBattlefields } from '../../shared/data/battlefields.ts';
 import { listEnvironments, listWeathers } from '../../shared/data/environments.ts';
+import { getItemDef } from '../../shared/data/items.ts';
 import { listFormations } from '../../shared/data/formations.ts';
 import { DEMO_EVENT_ID } from '../../shared/data/stage-events.ts';
 import type { BattlePhase, CommandId, PendingAction, TerrainZone } from '../../shared/data/types.ts';
@@ -69,9 +70,17 @@ export class BattleView {
   private readonly hintEl: HTMLElement;
   private readonly stageEl: HTMLElement;
   private readonly panelEl: HTMLElement;
+  private readonly partyEl: HTMLElement;
+  /** 指令栏。挂在战场右侧、行动条正下方 —— 竖排，好点，也给二级菜单留了位置。 */
+  private readonly actionsEl: HTMLElement;
   private readonly logEl: HTMLElement;
   private readonly overlayEl: HTMLElement;
   private readonly dialogEl: HTMLElement;
+  /** 行动条上的图标，按单位 id 复用 —— 每帧只改位置，不重建 DOM。 */
+  private readonly chips = new Map<string, HTMLElement>();
+  /** 行动条上那批图标属于哪一局。换局就得整个丢掉。 */
+  private renderedTurnSession = '';
+
   private readonly turnOrderEl: HTMLElement;
   private readonly trackEl: HTMLElement;
   private readonly speedButtons: HTMLElement[];
@@ -81,6 +90,15 @@ export class BattleView {
 
   /** 正在等待选目标的那条指令。 */
   private awaitingTarget: CommandId | null = null;
+  /** 点了「道具」但还没挑具体哪一种 —— 这时指令栏展开二级菜单。 */
+  private pickingItem = false;
+  /** 二级菜单里挑中的道具。选完目标才提交。 */
+  private pickedItemId: string | null = null;
+  /** 行动条是不是被玩家收起来了。 */
+  private turnOrderHidden = false;
+  /** 鼠标此刻指着的单位（只在「选目标」时记录）—— 行动条会给他加一圈标记。 */
+  private hoveredUnitId: string | undefined;
+  private readonly turnOrderToggleEl: HTMLElement;
   private renderedLog = 0;
   private renderedSession = '';
   /** 行动条的补间循环。 */
@@ -117,6 +135,7 @@ export class BattleView {
           <div class="game__log"></div>
         </aside>
         <footer class="game__footer">
+          <div class="party"></div>
           <div class="game__hint"></div>
           <div class="game__panel"></div>
         </footer>
@@ -133,12 +152,21 @@ export class BattleView {
     this.stageEl = pick(root, '.game__stage');
     this.hintEl = pick(root, '.game__hint');
     this.panelEl = pick(root, '.game__panel');
+    this.partyEl = pick(root, '.party');
     this.logEl = pick(root, '.game__log');
     this.overlayEl = pick(root, '.config-overlay');
     this.dialogEl = pick(root, '.config-dialog');
     this.speedButtons = [...root.querySelectorAll<HTMLElement>('.game__speed [data-speed]')];
 
-    // 行动条叠在 3D 战场的右上角 —— 它属于画面，不属于日志区
+    // 行动条叠在 3D 战场的右上角 —— 它属于画面，不属于日志区。
+    // 开关单独摆一行：面板收起来之后，玩家还得找得到它。
+    const turnOrderTools = document.createElement('div');
+    turnOrderTools.className = 'stage-tools';
+    turnOrderTools.innerHTML =
+      '<button type="button" class="stage-tools__toggle" data-action="toggle-turn-order">收起行动条</button>';
+    this.stageEl.appendChild(turnOrderTools);
+    this.turnOrderToggleEl = pick(turnOrderTools, '.stage-tools__toggle');
+
     const turnOrder = document.createElement('div');
     turnOrder.className = 'turn-order';
     turnOrder.hidden = true;
@@ -151,6 +179,13 @@ export class BattleView {
     this.stageEl.appendChild(turnOrder);
     this.turnOrderEl = turnOrder;
     this.trackEl = pick(turnOrder, '.turn-order__track');
+
+    // 指令栏也搬进战场，紧贴在行动条下面竖着排
+    const actionsPanel = document.createElement('div');
+    actionsPanel.className = 'stage-actions';
+    actionsPanel.hidden = true;
+    this.stageEl.appendChild(actionsPanel);
+    this.actionsEl = actionsPanel;
 
     this.bindEvents();
     this.refresh();
@@ -186,12 +221,18 @@ export class BattleView {
       : '';
 
     this.renderHint();
+    this.renderParty();
     this.renderPanel();
     this.renderLog();
     this.renderSpeed();
     this.renderDialog();
     this.renderTurnOrder();
     this.syncStage();
+
+    // 记下这一帧渲染的是哪份「可操作名单」—— 心跳据此判断要不要重画。
+    // 必须在这里记，而不能只在心跳里记：快照驱动的 refresh 同样会改掉名单，
+    // 若不同步，之后的心跳就会误以为「没变化」，画面停在一个过时的状态上。
+    this.lastAwaitingKey = mirror.awaitingUnitIds.join(',');
   }
 
   /**
@@ -201,9 +242,7 @@ export class BattleView {
    * 都得跟着变，否则会出现「行动条已经亮了、底下却还写着推进中」的矛盾画面。
    */
   refreshGauges(): void {
-    const awaitingKey = this.mirror.awaitingUnitIds.join(',');
-    if (awaitingKey !== this.lastAwaitingKey) {
-      this.lastAwaitingKey = awaitingKey;
+    if (this.mirror.awaitingUnitIds.join(',') !== this.lastAwaitingKey) {
       this.refresh();
       return;
     }
@@ -211,7 +250,7 @@ export class BattleView {
     this.renderTurnOrder();
   }
 
-  /** 上次渲染时的「可操作名单」，用来判断要不要整体重画。 */
+  /** 上一次渲染时用的「可操作名单」，用来判断要不要整体重画。 */
   private lastAwaitingKey = '';
 
   setConnectionStatus(status: ClientStatus, detail?: string): void {
@@ -229,17 +268,46 @@ export class BattleView {
     this.hintEl.innerHTML = `<span class="hint hint--error">服务端拒绝：${escapeHtml(message)}</span>`;
   }
 
-  /** 3D 舞台的拾取回调：只有「选目标」这一种用途了。 */
+  /** 3D 舞台的拾取回调：选目标。 */
   pickUnit(unitId: string): void {
     if (this.mirror.playing || !this.awaitingTarget) return;
 
     const unit = this.mirror.unitById(unitId);
-    if (!unit || unit.side !== 'enemy' || !unit.alive) return;
+    if (!unit?.alive) return;
+
+    // 目标在哪一边由指令说了算：攻击类打敌人，道具类只能给自己人
+    const side = getCommand(this.awaitingTarget).targetSide ?? 'enemy';
+    if (unit.side !== side) return;
 
     const actor = this.currentUnit();
     if (!actor) return;
 
-    this.commitAction({ actorId: actor.id, commandId: this.awaitingTarget, targetId: unit.id });
+    this.commitAction({
+      actorId: actor.id,
+      commandId: this.awaitingTarget,
+      targetId: unit.id,
+      itemId: this.pickedItemId ?? undefined,
+    });
+  }
+
+  /**
+   * 鼠标划过某个单位。
+   *
+   * 只有正在「选目标」时才记它 —— 行动条上会因此给这个单位加一圈标记，
+   * 好让玩家确认自己瞄的是不是想打的那个（战场上人挤人时尤其需要）。
+   */
+  hoverUnit(unitId: string | undefined): void {
+    const next = this.awaitingTarget && unitId ? unitId : undefined;
+    if (next === this.hoveredUnitId) return;
+
+    this.hoveredUnitId = next;
+    this.renderTurnOrder();
+  }
+
+  /** 取消选目标时也要把标记一起撤掉。 */
+  private clearHover(): void {
+    if (this.hoveredUnitId === undefined) return;
+    this.hoveredUnitId = undefined;
   }
 
   // -------------------------------------------------------------------------
@@ -247,24 +315,47 @@ export class BattleView {
   // -------------------------------------------------------------------------
 
   private bindEvents(): void {
+    // 底部的面板现在只剩布阵面板
     this.panelEl.addEventListener('click', (event) => {
-      const commandButton = closestFrom(event, '[data-command]');
-      const commandId = commandButton?.dataset.command as CommandId | undefined;
-      if (commandId) {
-        this.onCommandClick(commandId);
-        return;
-      }
-
       if (closestFrom(event, '[data-action="begin-battle"]')) {
         this.actions.onBeginBattle();
       }
     });
 
+    // 指令栏在战场右侧
+    this.actionsEl.addEventListener('click', (event) => {
+      const back = closestFrom(event, '[data-action="back-to-commands"]');
+      if (back) {
+        this.pickingItem = false;
+        this.pickedItemId = null;
+        this.refresh();
+        return;
+      }
+
+      const itemId = closestFrom(event, '[data-item]')?.dataset.item;
+      if (itemId) {
+        this.onItemClick(itemId);
+        return;
+      }
+
+      const commandId = closestFrom(event, '[data-command]')?.dataset.command as
+        | CommandId
+        | undefined;
+      if (commandId) this.onCommandClick(commandId);
+    });
+
     this.hintEl.addEventListener('click', (event) => {
       if (closestFrom(event, '[data-action="cancel-target"]')) {
         this.awaitingTarget = null;
+        this.clearHover();
         this.refresh();
       }
+    });
+
+    // 收起 / 展开行动条。只补一次行动条，不整体重画
+    this.turnOrderToggleEl.addEventListener('click', () => {
+      this.turnOrderHidden = !this.turnOrderHidden;
+      this.renderTurnOrder();
     });
 
     pick(this.root, '.game__speed').addEventListener('click', (event) => {
@@ -320,6 +411,15 @@ export class BattleView {
     if (!this.availabilityOf(actor, commandId).ok) return;
 
     const def = getCommand(commandId);
+
+    // 「道具」得先挑哪一件 —— 展开二级菜单
+    if (def.needsItem) {
+      this.pickingItem = true;
+      this.pickedItemId = null;
+      this.refresh();
+      return;
+    }
+
     if (def.requiresTarget) {
       this.awaitingTarget = commandId;
       this.refresh();
@@ -329,9 +429,21 @@ export class BattleView {
     this.commitAction({ actorId: actor.id, commandId });
   }
 
+  /** 二级菜单里挑好了一件道具 —— 收起来，转去选目标。 */
+  private onItemClick(itemId: string): void {
+    if (this.mirror.playing) return;
+    if (!this.currentUnit()) return;
+
+    this.pickedItemId = itemId;
+    this.pickingItem = false;
+    this.awaitingTarget = 'useItem';
+    this.refresh();
+  }
+
   /** 把这个单位的指令交给服务端。它的行动条此刻必须已经满了 —— 不满服务端会拒绝。 */
   private commitAction(action: PendingAction): void {
     this.awaitingTarget = null;
+    this.clearHover();
     this.actions.onAct(action.actorId, action);
   }
 
@@ -376,39 +488,139 @@ export class BattleView {
   private renderTurnOrder(): void {
     const mirror = this.mirror;
 
-    if (mirror.phase === 'deployment' || mirror.sessionId === '') {
-      this.turnOrderEl.hidden = true;
+    // 开关**一直显示**。布阵阶段尤其不能藏 —— 否则玩家一开局就不知道
+    // 右边那条东西是什么、能不能收，等开战了也无从找起。
+    this.turnOrderEl.hidden = this.turnOrderHidden;
+    this.turnOrderToggleEl.textContent = this.turnOrderHidden ? '▸ 展开行动条' : '▾ 收起行动条';
+
+    if (this.turnOrderHidden) return;
+
+    // 换局就把上一局的图标整个丢掉
+    if (mirror.sessionId !== this.renderedTurnSession) {
+      this.renderedTurnSession = mirror.sessionId;
+      this.chips.clear();
+      this.trackEl.replaceChildren();
+
+      const goal = document.createElement('div');
+      goal.className = 'turn-order__goal';
+      this.trackEl.appendChild(goal);
+    }
+
+    // 这一帧还该有谁
+    const live = new Set(mirror.units.map((unit) => unit.id));
+    for (const [id, el] of this.chips) {
+      if (live.has(id)) continue;
+      el.remove();
+      this.chips.delete(id);
+    }
+
+    /*
+     * 这个函数**每帧都会跑**（跟渲染同频），所以绝不能重建 innerHTML。
+     * 反复销毁重建会让布局跟着重排、把 is-ready 的缩放动画打断 ——
+     * 表现出来就是行动条在微微抖。这里只改真正变了的那几个属性。
+     */
+    const seen = new Map<string, number>();
+
+    for (const unit of mirror.units) {
+      const slot = seen.get(unit.side) ?? 0;
+      seen.set(unit.side, slot + 1);
+
+      let el = this.chips.get(unit.id);
+      if (!el) {
+        el = document.createElement('span');
+        el.className = `turn-chip turn-chip--${unit.side}`;
+        this.trackEl.appendChild(el);
+        this.chips.set(unit.id, el);
+      }
+
+      const gauge = Math.max(0, Math.min(100, mirror.displayGauge(unit)));
+
+      // 我方靠上、敌方靠下；同阵营内再错开三档
+      const rowBase = unit.side === 'ally' ? 2 : 28;
+
+      el.style.left = `${gauge.toFixed(2)}%`;
+      el.style.top = `${rowBase + (slot % 3) * 8}px`;
+      el.classList.toggle('is-ready', unit.awaitingCommand);
+      el.classList.toggle('is-down', !unit.alive);
+      el.classList.toggle('is-target', unit.id === this.hoveredUnitId);
+      el.textContent = unit.name.slice(0, 1);
+      el.title = `${unit.name} · ${Math.round(gauge)}%`;
+    }
+  }
+
+  /**
+   * 下方角色栏：我方五人的头像框。
+   *
+   * **只有一级** —— 名字、阵位、三条状态槽、身上的状态，全摊在这一格里。
+   * 点开再展开一层会让人不知道该看哪儿，来回切也乱。
+   *
+   * 轮到谁行动，它那张框就是金边 + 呼吸，跟场上头顶那枚旋转八面体是同一个金。
+   */
+  private renderParty(): void {
+    const mirror = this.mirror;
+
+    if (mirror.sessionId === '') {
+      this.partyEl.innerHTML = '';
       return;
     }
 
-    this.turnOrderEl.hidden = false;
+    const activeId = this.currentUnit()?.id;
 
-    // 同阵营里数一下序号 —— 用来把挨得近的图标上下错开，不然会叠死
-    const seen = new Map<string, number>();
-
-    const chips = mirror.units
+    this.partyEl.innerHTML = mirror.allies
       .map((unit) => {
-        const slot = seen.get(unit.side) ?? 0;
-        seen.set(unit.side, slot + 1);
-
-        const gauge = Math.max(0, Math.min(100, mirror.displayGauge(unit)));
-        const classes = ['turn-chip', `turn-chip--${unit.side}`];
-        if (unit.awaitingCommand) classes.push('is-ready');
+        const classes = ['party__slot'];
+        if (unit.id === activeId) classes.push('is-active');
         if (!unit.alive) classes.push('is-down');
 
-        // 我方靠上、敌方靠下；同阵营内再错开三档
-        const rowBase = unit.side === 'ally' ? 2 : 28;
-        const top = rowBase + (slot % 3) * 8;
-        const label = unit.name.slice(0, 1);
+        const { maxHp, maxMp, maxSp } = unit.stats;
+        const hp = mirror.displayHp(unit);
 
-        return `<span class="${classes.join(' ')}"
-                      style="left:${gauge.toFixed(2)}%;top:${top}px"
-                      title="${escapeHtml(unit.name)} · ${Math.round(gauge)}%"
-                >${escapeHtml(label)}</span>`;
+        const zone = this.zoneOf(unit);
+        const where = `${unit.formationRole ?? '—'}${zone ? ` · ${zone.name}` : ''}`;
+
+        const statuses = unit.statuses
+          .map(
+            (status) =>
+              `<span class="party__flag party__flag--${status.kind}" title="${escapeHtml(
+                status.desc,
+              )}">${escapeHtml(status.name)}</span>`,
+          )
+          .join('');
+
+        // 生命 / 法力 / 愤怒 —— 条要看得出长短，数字也要看得见，
+        // 光有细槽说不清「还剩几成、离放特技还差多少」。
+        const vitalRows: Array<[string, number, number, string]> = [
+          ['生命', hp, maxHp, 'hp'],
+          ['法力', unit.stats.mp, maxMp, 'mp'],
+          ['愤怒', unit.stats.sp, maxSp, 'sp'],
+        ];
+
+        const vitals = vitalRows
+          .map(([label, value, max, kind]) => {
+            const percent = max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
+            return `
+              <span class="party__stat">
+                <span class="party__stat-label">${label}</span>
+                <span class="party__bar">
+                  <i class="party__bar-fill party__bar-fill--${kind}" style="width:${percent.toFixed(1)}%"></i>
+                </span>
+                <span class="party__stat-value">${Math.round(value)} / ${Math.round(max)}</span>
+              </span>`;
+          })
+          .join('');
+
+        return `
+          <div class="${classes.join(' ')}" data-unit="${escapeHtml(unit.id)}">
+            <span class="party__portrait">${escapeHtml(unit.name.slice(0, 1))}</span>
+            <span class="party__info">
+              <span class="party__name">${escapeHtml(unit.name)}</span>
+              <span class="party__role">${escapeHtml(where)}</span>
+            </span>
+            <span class="party__stats">${vitals}</span>
+            <span class="party__flags">${statuses}</span>
+          </div>`;
       })
       .join('');
-
-    this.trackEl.innerHTML = `<div class="turn-order__goal"></div>${chips}`;
   }
 
   // -------------------------------------------------------------------------
@@ -529,8 +741,13 @@ export class BattleView {
 
     if (this.awaitingTarget) {
       const def = getCommand(this.awaitingTarget);
+      const where =
+        def.targetSide === 'ally' ? '点击我方队员作为目标' : '点击场上的敌人作为目标';
+      const item = this.pickedItemId ? getItemDef(this.pickedItemId) : undefined;
+      const what = item ? `「${item.name}」` : `「${def.label}」`;
+
       this.hintEl.innerHTML = `
-        <span class="hint"><b>${escapeHtml(actor.name)}</b> 使用「${def.label}」—— 点击场上的敌人作为目标</span>
+        <span class="hint"><b>${escapeHtml(actor.name)}</b> 使用${escapeHtml(what)} —— ${where}</span>
         <button type="button" class="hint__cancel" data-action="cancel-target">取消</button>`;
       return;
     }
@@ -543,13 +760,24 @@ export class BattleView {
 
   private renderPanel(): void {
     if (this.mirror.phase === 'deployment') {
+      // 布阵面板留在底部：它是开打前摊开看的东西，不是战斗中反复点的东西
       this.panelEl.className = 'game__panel game__panel--deploy';
       this.panelEl.innerHTML = this.renderDeployPanel();
+      this.actionsEl.hidden = true;
       return;
     }
 
-    this.panelEl.className = 'game__panel game__panel--commands';
-    this.panelEl.innerHTML = this.renderCommands();
+    // 指令栏是**独立浮层**，跟行动条没有依附关系 —— 各摆各的，各自能收起。
+    // 竖排一行一条：点起来顺手，日后挂二级菜单也是往下长。
+    this.panelEl.className = 'game__panel';
+    this.panelEl.innerHTML = '';
+    this.actionsEl.hidden = false;
+    this.actionsEl.innerHTML = `
+      <div class="stage-actions__head">
+        <span>指令</span>
+        <span class="stage-actions__who">${escapeHtml(this.currentUnit()?.name ?? '')}</span>
+      </div>
+      ${this.renderCommands()}`;
   }
 
   /**
@@ -594,6 +822,9 @@ export class BattleView {
 
   /** 指令栏。没轮到人动手时不显示按钮，而是说明在等什么。 */
   private renderCommands(): string {
+    // 二级菜单：点了「道具」但还没挑具体哪一种
+    if (this.pickingItem) return this.renderItemList();
+
     const actor = this.currentUnit();
 
     if (!actor) {
@@ -620,6 +851,44 @@ export class BattleView {
           <span class="cmd__cost">${formatCost(def)}</span>
         </button>`;
     }).join('');
+  }
+
+  /**
+   * 二级菜单：挑一件道具。
+   *
+   * 这就是把指令栏做成竖排的好处 —— 多一层只是往下多长几行，
+   * 不像横排那样一加就把上面的格子挤变形。
+   */
+  private renderItemList(): string {
+    const head = `
+      <div class="submenu__head">
+        <button type="button" class="submenu__back" data-action="back-to-commands">‹ 返回</button>
+        <span class="submenu__title">选择道具</span>
+      </div>`;
+
+    const stacks = this.mirror.items;
+    if (stacks.length === 0) {
+      return `${head}<div class="waiting">背包里没有道具了。</div>`;
+    }
+
+    const rows = stacks
+      .map((stack) => {
+        const def = getItemDef(stack.itemId);
+        if (!def) return '';
+
+        const classes = ['cmd', 'cmd--sub'];
+        if (this.pickedItemId === stack.itemId) classes.push('cmd--armed');
+
+        return `
+          <button type="button" class="${classes.join(' ')}" data-item="${escapeHtml(stack.itemId)}"
+                  title="${escapeHtml(def.desc)}">
+            <span class="cmd__label">${escapeHtml(def.name)}</span>
+            <span class="cmd__cost">× ${stack.count}</span>
+          </button>`;
+      })
+      .join('');
+
+    return `${head}${rows}`;
   }
 
   private zoneOf(unit: UnitSnapshot): TerrainZone | undefined {
@@ -669,8 +938,11 @@ export class BattleView {
     const canLook = idle && (mirror.phase === 'deployment' || mirror.phase === 'battle');
     stage.setInteractive(canLook);
 
-    // 只剩「选目标」一种拾取用途了
-    stage.setPickMode(idle && this.awaitingTarget ? 'enemy' : 'none');
+    // 只剩「选目标」一种拾取用途了。目标在哪边看指令：道具是给自己人的
+    const targetSide = this.awaitingTarget
+      ? (getCommand(this.awaitingTarget).targetSide ?? 'enemy')
+      : 'none';
+    stage.setPickMode(idle && this.awaitingTarget ? targetSide : 'none');
     stage.setActiveUnit(this.currentUnit()?.id);
   }
 }

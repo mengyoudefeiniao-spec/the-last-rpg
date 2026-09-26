@@ -38,6 +38,11 @@ const TIMING = {
 const ALLY_COLORS = [0x64d2bf, 0x6f9ef0, 0x7fd98a, 0xbf9af0, 0xf0c063];
 const ENEMY_COLORS = [0xc75d5d, 0xb1604a, 0xa0528f, 0x8f6a4a, 0x9b5a6b];
 
+/** 轮到谁行动时，那枚八面体悬在它头顶多高 —— 要抬到血条之上，别挤在一起。 */
+const ACTIVE_MARKER_Y = 3.5;
+/** 标识的颜色：跟行动条上「条满」的金色是同一个，玩家一眼能把两处连起来。 */
+const ACTIVE_MARKER_COLOR = 0xffd166;
+
 /** 地形配色 —— 与 CSS 里 .zone-label--* 的色系保持一致。 */
 const TERRAIN_COLORS: Record<TerrainKind, number> = {
   snow: 0x7fb8e8,
@@ -54,6 +59,8 @@ export type PickMode = 'none' | 'enemy' | 'ally';
 
 export interface BattleStageOptions {
   onUnitPick?: (unitId: string) => void;
+  /** 鼠标悬停在某个单位上（移开时给 undefined）。用来在行动条上打标记。 */
+  onUnitHover?: (unitId: string | undefined) => void;
 }
 
 interface UnitView {
@@ -64,6 +71,8 @@ interface UnitView {
   bodyMaterial: THREE.MeshStandardMaterial;
   ring: THREE.Mesh;
   ringMaterial: THREE.MeshBasicMaterial;
+  /** 轮到它行动时头顶浮起的那枚旋转几何标识。 */
+  marker: THREE.Group;
   /** 单位自身颜色 —— 离开地形后脚下光环要恢复成它。 */
   homeRingColor: number;
   /** 站位（会随布阵换位变化）。 */
@@ -102,6 +111,9 @@ export class BattleStage {
   private readonly container: HTMLElement;
   private readonly mirror: BattleMirror;
   private readonly onUnitPick: ((unitId: string) => void) | undefined;
+  private readonly onUnitHover: ((unitId: string | undefined) => void) | undefined;
+  /** 上一次悬停上报的单位 —— 只在真的换了人时才回调，别每帧都喊。 */
+  private hoveredId: string | undefined;
 
   private readonly animator = new Animator();
   private readonly scene = new THREE.Scene();
@@ -134,6 +146,7 @@ export class BattleStage {
     this.container = container;
     this.mirror = mirror;
     this.onUnitPick = options.onUnitPick;
+    this.onUnitHover = options.onUnitHover;
 
     const w = Math.max(1, container.clientWidth);
     const h = Math.max(1, container.clientHeight);
@@ -179,6 +192,7 @@ export class BattleStage {
 
     this.renderer.domElement.addEventListener('pointerdown', this.handlePointerDown);
     this.renderer.domElement.addEventListener('pointerup', this.handlePointerUp);
+    this.renderer.domElement.addEventListener('pointermove', this.handlePointerMove);
 
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
     this.resizeObserver.observe(container);
@@ -474,6 +488,7 @@ export class BattleStage {
 
     this.renderer.domElement.removeEventListener('pointerdown', this.handlePointerDown);
     this.renderer.domElement.removeEventListener('pointerup', this.handlePointerUp);
+    this.renderer.domElement.removeEventListener('pointermove', this.handlePointerMove);
     this.controls.dispose();
     this.formationView?.dispose();
     this.weatherLayer?.dispose();
@@ -486,7 +501,16 @@ export class BattleStage {
       else material?.dispose();
     });
     this.renderer.dispose();
-    this.container.replaceChildren();
+
+    /*
+     * 只拆**自己挂上去**的那两个节点（canvas 与 CSS2D 层）。
+     * 早先这里是 this.container.replaceChildren() —— 但那会把容器里所有东西一起抹掉，
+     * 而行动条、行动条开关、指令栏都挂在这同一个容器上，
+     * 于是「重开一局」一按，它们就整个消失了。容器不是这一层的私产。
+     */
+    this.renderer.domElement.remove();
+    this.labelRenderer.domElement.remove();
+
     this.views.clear();
   }
 
@@ -693,6 +717,33 @@ export class BattleStage {
     shadow.position.y = 0.012;
     tilt.add(shadow);
 
+    // 「轮到你了」的头顶标识：一枚旋转的八面体。
+    // 外壳是线框、内芯是半透明的实体 —— 单用线框太细，在战场的暖色调里会糊掉。
+    // 挂在 group 上而不是 tilt 上：否则单位一倒地，它也跟着翻过去了。
+    const marker = new THREE.Group();
+    marker.add(
+      new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.26, 0),
+        new THREE.MeshBasicMaterial({
+          color: ACTIVE_MARKER_COLOR,
+          wireframe: true,
+          transparent: true,
+          opacity: 0.95,
+        }),
+      ),
+      new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.15, 0),
+        new THREE.MeshBasicMaterial({
+          color: ACTIVE_MARKER_COLOR,
+          transparent: true,
+          opacity: 0.35,
+        }),
+      ),
+    );
+    marker.position.y = ACTIVE_MARKER_Y;
+    marker.visible = false;
+    group.add(marker);
+
     const pickBox = new THREE.Mesh(
       new THREE.CylinderGeometry(0.72, 0.72, 2.3, 10),
       new THREE.MeshBasicMaterial({ visible: false }),
@@ -735,6 +786,7 @@ export class BattleStage {
       bodyMaterial,
       ring,
       ringMaterial,
+      marker,
       homeRingColor: color,
       homePosition: new THREE.Vector3(unit.position.x, 0, unit.position.z),
       homeRotationY: 0,
@@ -977,6 +1029,8 @@ export class BattleStage {
         synced.active = this.activeUnitId === unit.id;
         view.bar.root.classList.toggle('is-active', synced.active);
         view.ringMaterial.opacity = synced.active ? 0.95 : 0.45;
+        // 标识只在轮到它的时候浮起来 —— 全场同时只该有一个人在转
+        view.marker.visible = synced.active && !down;
       }
 
       // 站在地形里的单位，脚下光环换成地形色
@@ -995,9 +1049,19 @@ export class BattleStage {
   /** 存活单位的站位环轻微呼吸，让画面不至于是死的。 */
   private syncRingPulse(): void {
     const pulse = 0.4 + Math.sin(this.clock.elapsedTime * 1.6) * 0.12;
+    const spin = this.clock.elapsedTime;
+
     for (const view of this.views.values()) {
       if (view.fallen) continue;
       view.ringMaterial.opacity = this.activeUnitId === view.id ? 0.95 : pulse;
+
+      // 轮到这个单位时，头顶那枚八面体转起来，再轻轻上下浮 ——
+      // 不靠文字也能一眼看出「现在该谁动」。
+      if (view.marker.visible) {
+        view.marker.rotation.y = spin * 1.9;
+        view.marker.rotation.x = spin * 0.8;
+        view.marker.position.y = ACTIVE_MARKER_Y + Math.sin(spin * 3.2) * 0.09;
+      }
     }
   }
 
@@ -1040,6 +1104,33 @@ export class BattleStage {
     if (this.pickMode === 'ally' && unit.side !== 'ally') return;
 
     this.onUnitPick(unitId);
+  };
+
+  /**
+   * 鼠标划过战场时报出「现在指着谁」，用来在行动条上给目标打标记。
+   *
+   * 只在真的换了人时才回调 —— 每个 pointermove 都喊一遍，上层就得白重绘一次行动条。
+   */
+  private readonly handlePointerMove = (event: PointerEvent): void => {
+    if (this.disposed || !this.onUnitHover) return;
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.set(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+
+    const hit = this.raycaster.intersectObjects(this.pickables, false)[0];
+    const unitId = hit?.object.userData['unitId'];
+    const hovered =
+      typeof unitId === 'string' && this.mirror.unitById(unitId)?.alive === true
+        ? unitId
+        : undefined;
+
+    if (hovered === this.hoveredId) return;
+    this.hoveredId = hovered;
+    this.onUnitHover(hovered);
   };
 }
 

@@ -12,14 +12,12 @@ export const BALANCE = {
   critMultiplier: 1.5,
   /** 防御姿态的减伤比例。 */
   defendReduction: 0.5,
-  /** 防御姿态期间额外获得的 SP。 */
+  /** 防御姿态额外获得的 SP。防御姿态本身持续到该单位下次条满为止。 */
   defendSpReward: 10,
   /** 物理防御对伤害的抵消系数。 */
   defFactor: 0.6,
   /** 法术抗性对伤害的抵消系数。 */
   resFactor: 0.6,
-  /** 受击获得的 SP = 实际伤害 × 该系数。 */
-  spGainPerDamageTaken: 0.6,
   /** 每一轮自然回复的 SP。注意行动条下没有「回合」，以「全员各行动一次」为一轮。 */
   spRegenPerRound: 6,
   /** 每一轮自然回复的 MP。 */

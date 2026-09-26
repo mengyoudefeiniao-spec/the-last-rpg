@@ -2,6 +2,7 @@ import { BALANCE } from '../../config/balance.ts';
 import { EventBus } from '../../core/event-bus.ts';
 import { createRng, type Rng } from '../../core/rng.ts';
 import type {
+  ActiveStatus,
   BattleEvents,
   Battlefield,
   BattleLogEntry,
@@ -11,6 +12,8 @@ import type {
   BattleUnit,
   CommandDef,
   Formation,
+  ItemDef,
+  ItemStack,
   LogKind,
   PendingAction,
   Side,
@@ -18,7 +21,8 @@ import type {
   StatusDef,
   StatusTrigger,
 } from '../../data/types.ts';
-import { getStatusDef } from '../../data/statuses.ts';
+import { getStatusDef, type StatusId } from '../../data/statuses.ts';
+import { getItemDef, STARTING_ITEMS } from '../../data/items.ts';
 import { chooseAutoAllyAction, chooseEnemyAction } from './ai.ts';
 import {
   applyDamage,
@@ -106,6 +110,8 @@ export interface BattleOptions {
   formation?: Formation;
   /** 固定 seed 即可重放同一场战斗，便于复现 bug。 */
   seed?: number;
+  /** 开局的队伍道具。省略时用 STARTING_ITEMS（原型阶段的默认配置）。 */
+  items?: ReadonlyArray<ItemStack>;
 }
 
 /** 没有任何地形效果的空白战场。 */
@@ -172,6 +178,14 @@ export class Battle {
   round = 0;
   result: BattleResult | null = null;
 
+  /**
+   * 队伍共用的道具池。
+   *
+   * 全队一个池子，而不是每人一个背包 —— 界面上的「道具」列表是**队伍的**，
+   * 不是某个人身上的。用掉一个就少一个。
+   */
+  readonly partyItems: ItemStack[];
+
   private readonly rng: Rng;
   private fled = false;
   /** 防重入：advance 与 submitAction 都是异步的，不能交错执行。 */
@@ -182,6 +196,7 @@ export class Battle {
     this.battlefield = options.battlefield ?? emptyBattlefield();
     this.formation = options.formation ?? emptyFormation();
     this.rng = createRng(options.seed ?? 0x5eed);
+    this.partyItems = (options.items ?? STARTING_ITEMS).map((stack) => ({ ...stack }));
     this.assignInitialPositions();
   }
 
@@ -316,6 +331,10 @@ export class Battle {
       if (!isAlive(unit)) continue;
       if (unit.actionGauge < BALANCE.gaugeMax) continue;
 
+      // 到点了 —— 上一次摆的防御姿态到这里结束。
+      // 「防御撑到下次行动点」说的就是这一刻：在此之前敌人打你都是减半的。
+      unit.isDefending = false;
+
       if (unit.isPlayerControlled) {
         if (unit.awaitingCommand) continue;
 
@@ -370,7 +389,7 @@ export class Battle {
     await this.endTurn(actor);
   }
 
-  /** 一次行动的收尾：DoT/HoT、状态倒计时、解除防御、归位，然后看看要不要开新一轮。 */
+  /** 一次行动的收尾：DoT/HoT、状态倒计时、归位，然后看看要不要开新一轮。 */
   private async endTurn(actor: BattleUnit): Promise<void> {
     await this.applyStatusTicks(actor, 'actionEnd');
     if (this.finishIfOver()) return;
@@ -379,8 +398,7 @@ export class Battle {
       this.logIt('status', `${actor.name} 的「${status.def.name}」结束了`);
     }
 
-    // 防御姿态只护到「自己下次行动之前」
-    actor.isDefending = false;
+    // 防御姿态**不在这里解** —— 它要一直撑到这个单位下次条满（见 processReadyUnits）
     await this.director?.afterAction?.(actor);
 
     if (this.finished) return;
@@ -577,6 +595,15 @@ export class Battle {
         break;
       }
 
+      case 'useItem': {
+        if (target) {
+          await this.useItem(actor, target, action.itemId);
+        } else {
+          this.logIt('system', `${actor.name} 的「道具」没有指定到自己人身上，作罢`);
+        }
+        break;
+      }
+
       case 'defend': {
         actor.isDefending = true;
         const gained = gainSp(actor, BALANCE.defendSpReward);
@@ -596,6 +623,103 @@ export class Battle {
         break;
       }
     }
+  }
+
+  /**
+   * 用掉一件道具。
+   *
+   * 道具全是**单体** —— 只能给自己人。所以这里会拦下「对敌人用」的情况：
+   * 界面本来就不该给这个选项，但服务端不能指望界面守规矩。
+   */
+  private async useItem(
+    actor: BattleUnit,
+    target: BattleUnit,
+    itemId: string | undefined,
+  ): Promise<void> {
+    const def = itemId ? getItemDef(itemId) : undefined;
+    const stack = itemId
+      ? this.partyItems.find((entry) => entry.itemId === itemId)
+      : undefined;
+
+    if (!def || !stack || stack.count <= 0) {
+      this.logIt('resource', `${actor.name} 想用道具，但背包里已经没有这一件了`);
+      return;
+    }
+
+    if (target.side !== actor.side) {
+      this.logIt('system', `道具只能对自己人用，「${def.name}」没有出手`);
+      return;
+    }
+
+    stack.count -= 1;
+    if (stack.count <= 0) {
+      this.partyItems.splice(this.partyItems.indexOf(stack), 1);
+    }
+
+    await this.applyItem(actor, target, def);
+  }
+
+  /** 结算一件道具。恢复 / 解除 / 增益三类各走一条路。 */
+  private async applyItem(actor: BattleUnit, target: BattleUnit, def: ItemDef): Promise<void> {
+    if (def.heal) {
+      const { resource, scale } = def.heal;
+      const isHp = resource === 'hp';
+      const max = isHp ? target.stats.maxHp : target.stats.maxMp;
+      const before = isHp ? target.stats.hp : target.stats.mp;
+
+      const amount =
+        scale.mode === 'full'
+          ? max
+          : scale.mode === 'flat'
+            ? scale.amount
+            : Math.round(max * scale.percent);
+
+      const after = Math.max(0, Math.min(max, Math.round(before + amount)));
+      const healed = Math.round(after - before);
+
+      if (isHp) target.stats.hp = after;
+      else target.stats.mp = after;
+
+      const label = isHp ? '生命' : '法力';
+      this.logIt(
+        'heal',
+        healed > 0
+          ? `${actor.name} 给 ${target.name} 用了「${def.name}」，回复 ${healed} 点${label}（${Math.round(after)}/${max}）`
+          : `${actor.name} 给 ${target.name} 用了「${def.name}」，但${label}已是满的`,
+      );
+      return;
+    }
+
+    if (def.cure) {
+      const removed = target.statuses.filter((status) => this.curable(def, status));
+      target.statuses = target.statuses.filter((status) => !this.curable(def, status));
+
+      this.logIt(
+        'status',
+        removed.length > 0
+          ? `${actor.name} 给 ${target.name} 用了「${def.name}」，解除「${removed.map((s) => s.def.name).join('、')}」`
+          : `${actor.name} 给 ${target.name} 用了「${def.name}」，但没有可解的异常`,
+      );
+      return;
+    }
+
+    if (def.buffStatus) {
+      const statusDef = getStatusDef(def.buffStatus as StatusId);
+      await this.inflict(target, statusDef, actor);
+      this.logIt(
+        'status',
+        `${actor.name} 给 ${target.name} 用了「${def.name}」，获得「${statusDef.name}」`,
+      );
+      return;
+    }
+
+    this.logIt('system', `【占位】「${def.name}」还没有实装效果`);
+  }
+
+  /** 这件道具解不解得掉这个状态。只对减益生效 —— 增益本来就不该被「解」。 */
+  private curable(def: ItemDef, status: ActiveStatus): boolean {
+    if (!def.cure || status.def.kind !== 'debuff') return false;
+    return def.cure.mode === 'all' || def.cure.statusIds.includes(status.def.id);
   }
 
   private async strike(
@@ -679,18 +803,33 @@ export class Battle {
     foes: readonly BattleUnit[],
   ): BattleUnit | undefined {
     if (def.selfOnly) return actor;
-    if (!def.requiresTarget || foes.length === 0) return undefined;
+
+    // 道具这类指令的目标在自己这边 —— 从本方存活者里挑
+    const pool =
+      def.targetSide === 'ally'
+        ? this.survivorsOf(actor.side === 'ally' ? 'ally' : 'enemy')
+        : foes;
+
+    if (!def.requiresTarget || pool.length === 0) return undefined;
 
     const requested = action.targetId
-      ? foes.find((foe) => foe.id === action.targetId)
+      ? pool.find((unit) => unit.id === action.targetId)
       : undefined;
     if (requested) return requested;
 
-    const fallback = foes.reduce((weakest, foe) =>
-      foe.stats.hp < weakest.stats.hp ? foe : weakest,
+    /*
+     * 道具**不做兜底**：指错人（比如点了敌人）就该整个作废，
+     * 而不是擅自换个人把药灌下去 —— 药是有限的，乱花比不花更糟。
+     * 攻击类才需要「原目标死了就换一个」这种宽容。
+     */
+    if (def.needsItem) return undefined;
+
+    // 没指定（或指定的人已倒下）就兜底：挑血最少的那个
+    const fallback = pool.reduce((weakest, unit) =>
+      unit.stats.hp < weakest.stats.hp ? unit : weakest,
     );
     if (action.targetId) {
-      this.logIt('system', `${actor.name} 原定目标已不可攻击，转向 ${fallback.name}`);
+      this.logIt('system', `${actor.name} 原定目标已不可用，转向 ${fallback.name}`);
     }
     return fallback;
   }

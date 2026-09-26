@@ -147,12 +147,32 @@ export function resolveAttack(
   return applyDamage(defender, Math.max(BALANCE.minDamage, Math.round(raw)), crit);
 }
 
+/**
+ * 挨了一下之后能涨多少愤怒 —— 按**这一下掉了多少比例的血**查表。
+ *
+ * 为什么不用线性（掉多少血给多少怒）：那样血厚的肉盾永远攒不出特技，
+ * 血薄的脆皮挨两下就满怒。按比例看的是「你被削掉了几成」，
+ * 跟血量厚薄无关，挨得越狠越气 —— 这样各种体型的单位攒怒节奏才一致。
+ */
+export function spFromDamage(lostPercent: number): number {
+  if (lostPercent <= 0) return 0;
+  if (lostPercent < 1) return 1; // 擦破皮也给 1 点，不然小伤永远攒不出特技
+  if (lostPercent < 10) return Math.floor(lostPercent);
+  if (lostPercent < 20) return 10;
+  if (lostPercent < 30) return 15;
+  if (lostPercent < 50) return 25;
+  if (lostPercent < 80) return 40;
+  return 55;
+}
+
 /** 直接扣血并结算「受击获得愤怒」。DoT 也走这里，所以中毒挨打同样涨怒。 */
 export function applyDamage(target: BattleUnit, amount: number, crit = false): DamageOutcome {
   const dealt = Math.max(0, Math.min(target.stats.hp, Math.round(amount)));
   target.stats.hp -= dealt;
 
-  let spGain = dealt * BALANCE.spGainPerDamageTaken;
+  const lostPercent = target.stats.maxHp > 0 ? (dealt / target.stats.maxHp) * 100 : 0;
+  let spGain = spFromDamage(lostPercent);
+
   const bonus = target.statuses.reduce(
     (sum, status) => sum + (status.def.spGainBonus ?? 0),
     0,

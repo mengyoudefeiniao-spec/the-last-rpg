@@ -159,6 +159,7 @@ export class BattleSession {
       scenery: this.scenery(),
       units: this.battle.units.map((unit) => this.toUnitSnapshot(unit)),
       awaitingUnitIds: this.battle.awaitingUnits.map((unit) => unit.id),
+      items: this.battle.partyItems.map((stack) => ({ ...stack })),
       log: [...this.battle.log],
       result: this.battle.result,
     };
@@ -239,7 +240,14 @@ export class BattleSession {
     if (unit.isPlayerControlled) {
       // 指令可用性在服务端算一次，客户端照着显示 —— 避免客户端自己推一份规则
       snapshot.commands = COMMAND_ORDER.map((id) => {
-        const check = checkUsable(unit, getCommand(id));
+        const def = getCommand(id);
+        const check = checkUsable(unit, def);
+
+        // 道具是特例：资源够不代表能用，背包里得真有东西
+        if (check.ok && def.needsItem && this.battle.partyItems.length === 0) {
+          return { id, ok: false, reason: '背包里已经没有道具了' };
+        }
+
         return check.ok ? { id, ok: true } : { id, ok: false, reason: check.reason };
       });
 

@@ -87,6 +87,7 @@ async function handleMessage(message: ServerMessage): Promise<void> {
     mirror.applySnapshot(snapshot);
     stage = new BattleStage(view.stageContainer, mirror, {
       onUnitPick: (unitId) => view.pickUnit(unitId),
+      onUnitHover: (unitId) => view.hoverUnit(unitId),
     });
     view.attachStage(stage);
     view.refresh();

@@ -7,6 +7,7 @@ import type {
   CommandId,
   EnvironmentTheme,
   Formation,
+  ItemStack,
   PendingAction,
   Side,
   Stats,
@@ -99,6 +100,8 @@ export interface BattleSnapshot {
   units: UnitSnapshot[];
   /** 行动值已满、正等着指令的我方单位 —— 完整状态里也带一份，方便重连时对齐。 */
   awaitingUnitIds: string[];
+  /** 队伍共用的道具。全队一个池子，用掉一个就少一个。 */
+  items: ItemStack[];
   log: BattleLogEntry[];
   result: BattleResult | null;
 }

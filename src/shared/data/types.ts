@@ -130,6 +130,49 @@ export interface BattleUnit {
 }
 
 // ---------------------------------------------------------------------------
+// 道具 —— 队伍共用一个池子
+// ---------------------------------------------------------------------------
+
+/** 道具的大类，决定它怎么结算。 */
+export type ItemKind = 'heal' | 'cure' | 'buff';
+
+/** 恢复量的口径：固定值 / 按上限比例 / 直接回满。 */
+export type HealScale =
+  | { mode: 'flat'; amount: number }
+  | { mode: 'percent'; percent: number }
+  | { mode: 'full' };
+
+/** 解除异常的范围：点名几类，或者干脆全解。 */
+export type CureScope = { mode: 'some'; statusIds: string[] } | { mode: 'all' };
+
+/**
+ * 道具定义。
+ *
+ * 本作道具**一律单体**，只能对我方一个人用（见 target）。
+ * 日后要加群体道具，在这里补一种 target 并让 Battle 结算时遍历目标即可。
+ */
+export interface ItemDef {
+  id: string;
+  name: string;
+  desc: string;
+  kind: ItemKind;
+  /** 用给谁。目前只有我方单体。 */
+  target: 'ally';
+  /** 恢复类：回的是 HP 还是 MP，按什么口径。 */
+  heal?: { resource: 'hp' | 'mp'; scale: HealScale };
+  /** 解除类：能解掉哪些异常。 */
+  cure?: CureScope;
+  /** 增益类：施加哪个状态（填状态表里的 id）。 */
+  buffStatus?: string;
+}
+
+/** 背包里的一格：一种道具 + 还剩几个。 */
+export interface ItemStack {
+  itemId: string;
+  count: number;
+}
+
+// ---------------------------------------------------------------------------
 // 阵法 —— 只作用于我方
 // ---------------------------------------------------------------------------
 
@@ -324,6 +367,7 @@ export type CommandId =
   | 'attack'
   | 'spell'
   | 'skill'
+  | 'useItem'
   | 'talisman'
   | 'spiritTreasure'
   | 'summon'
@@ -338,6 +382,8 @@ export interface CommandDef {
   desc: string;
   /** 是否需要选择目标。 */
   requiresTarget: boolean;
+  /** 目标在哪一边。默认 enemy —— 攻击类的都打敌人，道具类只能给自己人。 */
+  targetSide?: 'enemy' | 'ally';
   /** 只能对自己使用。 */
   selfOnly?: boolean;
   /** 消耗。 */
@@ -349,6 +395,8 @@ export interface CommandDef {
   resolvesImmediately: boolean;
   /** 原型阶段的占位实现（法宝 / 灵宝 / 召唤 / 捕捉）。 */
   placeholder?: boolean;
+  /** 需要先挑一件道具（会展开二级菜单）。 */
+  needsItem?: boolean;
 }
 
 /** 玩家下达的一条指令。 */
@@ -356,6 +404,8 @@ export interface PendingAction {
   actorId: string;
   commandId: CommandId;
   targetId?: string;
+  /** 用哪件道具 —— 只有 useItem 会带。 */
+  itemId?: string;
 }
 
 /**

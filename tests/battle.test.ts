@@ -7,12 +7,14 @@ import { getBattlefield } from '../src/shared/data/battlefields.ts';
 import { getFormation, listFormations } from '../src/shared/data/formations.ts';
 import { createSampleBattleUnits } from '../src/shared/data/sample-battle.ts';
 import { getStatusDef } from '../src/shared/data/statuses.ts';
-import type { BattlePhase } from '../src/shared/data/types.ts';
+import type { BattlePhase, BattleUnit } from '../src/shared/data/types.ts';
 import { Battle } from '../src/shared/systems/battle/battle.ts';
 import {
+  applyDamage,
   createUnit,
   isAlive,
   resolveAttack,
+  spFromDamage,
   type DamageSpec,
 } from '../src/shared/systems/battle/battle-unit.ts';
 import { applyStatus, effectiveStat } from '../src/shared/systems/battle/status-effects.ts';
@@ -324,6 +326,49 @@ test('防御姿态能显著降低受到的伤害', () => {
   );
 });
 
+test('防御一直撑到下次行动点，中途挨打都是减半的', async () => {
+  const battle = makeBattle(8);
+  battle.start();
+  await battle.beginBattle();
+
+  await advanceUntilReady(battle);
+  const guard = battle.awaitingUnits[0];
+  assert.ok(guard, '应当有人能动');
+
+  await battle.submitAction(guard.id, { actorId: guard.id, commandId: 'defend' });
+  assert.equal(guard.isDefending, true, '摆完防御就该是防御姿态');
+
+  // 一路推到它下次条满 —— 这中间敌人打它都得是减半的，
+  // 所以姿态一松就是 bug（之前正是在行动收尾时被清掉的）。
+  // 注意：队友也在等指令，得替他们下掉，否则全场会一直冻结着推不动。
+  let reachedNextPoint = false;
+  for (let step = 0; step < 800; step += 1) {
+    if (battle.finished) break;
+
+    await battle.advance(100);
+
+    if (guard.actionGauge >= BALANCE.gaugeMax) {
+      reachedNextPoint = true;
+      break;
+    }
+
+    assert.equal(
+      guard.isDefending,
+      true,
+      `还没到下次行动点（第 ${step} 步，条 ${guard.actionGauge.toFixed(1)}），防御不该解除`,
+    );
+
+    for (let i = 0; i < 5; i += 1) {
+      const other = battle.awaitingUnits.find((unit) => unit.id !== guard.id);
+      if (!other) break;
+      await battle.submitAction(other.id, { actorId: other.id, commandId: 'defend' });
+    }
+  }
+
+  assert.ok(reachedNextPoint, '推了这么久，它总该攒到下一格');
+  assert.equal(guard.isDefending, false, '到了下次行动点，防御姿态就该到期');
+});
+
 test('受击会积累愤怒（SP）', () => {
   const target = createUnit({
     id: 'test.target',
@@ -348,6 +393,59 @@ test('受击会积累愤怒（SP）', () => {
   assert.ok(outcome.dealt > 0);
   assert.ok(outcome.spGained > 0, '受击应当获得愤怒');
   assert.ok(target.stats.sp <= target.stats.maxSp, '愤怒不应超过上限');
+});
+
+test('愤怒表：每一档都对得上', () => {
+  const cases: Array<[number, number]> = [
+    [0, 0],
+    [1, 1],
+    [5, 5],
+    [9, 9],
+    [10, 10],
+    [19, 10],
+    [20, 15],
+    [29, 15],
+    [30, 25],
+    [49, 25],
+    [50, 40],
+    [79, 40],
+    [80, 55],
+    [100, 55],
+  ];
+
+  for (const [percent, expected] of cases) {
+    assert.equal(spFromDamage(percent), expected, `掉 ${percent}% 血该给 ${expected} 愤怒`);
+  }
+});
+
+test('愤怒看的是「被削掉几成血」，跟伤害绝对值无关', () => {
+  const frail = createUnit({
+    id: 'test.frail',
+    name: '脆皮',
+    side: 'ally',
+    stats: { maxHp: 100, maxMp: 0, maxSp: 100, sp: 0, def: 0, res: 0, spd: 10 },
+  });
+  const tanky = createUnit({
+    id: 'test.tanky',
+    name: '肉盾',
+    side: 'ally',
+    stats: { maxHp: 1000, maxMp: 0, maxSp: 100, sp: 0, def: 0, res: 0, spd: 10 },
+  });
+
+  // 两边都掉了「一成血」：一个挨 10 点，一个挨 100 点
+  const a = applyDamage(frail, 10);
+  const b = applyDamage(tanky, 100);
+
+  assert.equal(a.spGained, 10, '掉一成血给 10 愤怒');
+  assert.equal(
+    b.spGained,
+    a.spGained,
+    `掉同样的比例就该给同样的愤怒（实际 ${a.spGained} vs ${b.spGained}）—— 否则肉盾永远攒不出特技`,
+  );
+
+  // 挨得越狠，涨得越多
+  const c = applyDamage(tanky, 250); // 25% → 15
+  assert.equal(c.spGained, 15, '掉两成半给 15 愤怒');
 });
 
 test('逃跑成功会立即结束战斗', async () => {
@@ -408,8 +506,189 @@ test('挂了 director 时，演出点会被依次回调', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// 布阵与地形
+// 道具
 // ---------------------------------------------------------------------------
+
+/** 造一个「轮到某人行动」的局面，好在上面试道具。 */
+async function readyBattle(seed: number): Promise<{ battle: Battle; actor: BattleUnit }> {
+  const battle = makeBattle(seed);
+  battle.start();
+  await battle.beginBattle();
+  await advanceUntilReady(battle);
+
+  const actor = battle.awaitingUnits[0];
+  assert.ok(actor, '应当有人轮到行动');
+  return { battle, actor };
+}
+
+test('回复类道具：按口径回血，并扣掉一件', async () => {
+  const { battle, actor } = await readyBattle(12);
+
+  const ally = battle.units.find((unit) => unit.side === 'ally' && unit.id !== actor.id);
+  assert.ok(ally, '需要一个队友当目标');
+  ally.stats.hp = 10;
+
+  const before = battle.partyItems.find((stack) => stack.itemId === 'hpSalve')?.count ?? 0;
+  assert.ok(before > 0, '开局应当带了几瓶金创药');
+
+  await battle.submitAction(actor.id, {
+    actorId: actor.id,
+    commandId: 'useItem',
+    itemId: 'hpSalve',
+    targetId: ally.id,
+  });
+
+  assert.equal(ally.stats.hp, 90, '金创药固定回 80 点');
+  assert.equal(
+    battle.partyItems.find((stack) => stack.itemId === 'hpSalve')?.count,
+    before - 1,
+    '用掉一件就该少一件',
+  );
+});
+
+test('比例回复与全满回复各按各的口径', async () => {
+  const { battle, actor } = await readyBattle(13);
+
+  const ally = battle.units.find((unit) => unit.side === 'ally' && unit.id !== actor.id);
+  assert.ok(ally);
+
+  ally.stats.hp = 10;
+  await battle.submitAction(actor.id, {
+    actorId: actor.id,
+    commandId: 'useItem',
+    itemId: 'hpPaste',
+    targetId: ally.id,
+  });
+  assert.equal(ally.stats.hp, 10 + Math.round(ally.stats.maxHp * 0.35), '生肌膏按上限的 35% 回');
+
+  ally.stats.hp = 1;
+  await battle.advance(6000);
+  const actor2 = battle.awaitingUnits[0];
+  if (actor2) {
+    await battle.submitAction(actor2.id, {
+      actorId: actor2.id,
+      commandId: 'useItem',
+      itemId: 'hpElixir',
+      targetId: ally.id,
+    });
+    assert.equal(ally.stats.hp, ally.stats.maxHp, '大还丹直接回满');
+  }
+});
+
+test('解除类道具：只解该解的，增益不动', async () => {
+  const { battle, actor } = await readyBattle(14);
+
+  const ally = battle.units.find((unit) => unit.side === 'ally' && unit.id !== actor.id);
+  assert.ok(ally);
+
+  applyStatus(ally, getStatusDef('poison'), 'test', 3);
+  applyStatus(ally, getStatusDef('burn'), 'test', 3);
+  applyStatus(ally, getStatusDef('atkUp'), 'test', 3);
+
+  // 解毒散只解中毒
+  await battle.submitAction(actor.id, {
+    actorId: actor.id,
+    commandId: 'useItem',
+    itemId: 'cureOne',
+    targetId: ally.id,
+  });
+
+  assert.ok(!ally.statuses.some((s) => s.def.id === 'poison'), '中毒该被解掉');
+  assert.ok(ally.statuses.some((s) => s.def.id === 'burn'), '灼烧不在解毒散的范围内');
+  assert.ok(ally.statuses.some((s) => s.def.id === 'atkUp'), '增益绝不该被「解」');
+});
+
+test('还魂香：清掉全部异常，但增益留着', async () => {
+  const { battle, actor } = await readyBattle(15);
+
+  const ally = battle.units.find((unit) => unit.side === 'ally' && unit.id !== actor.id);
+  assert.ok(ally);
+
+  applyStatus(ally, getStatusDef('poison'), 'test', 3);
+  applyStatus(ally, getStatusDef('burn'), 'test', 3);
+  applyStatus(ally, getStatusDef('stun'), 'test', 3);
+  applyStatus(ally, getStatusDef('defUp'), 'test', 3);
+
+  await battle.submitAction(actor.id, {
+    actorId: actor.id,
+    commandId: 'useItem',
+    itemId: 'cureAll',
+    targetId: ally.id,
+  });
+
+  assert.deepEqual(
+    ally.statuses.map((s) => s.def.id),
+    ['defUp'],
+    '异常该全清，增益该原样留着',
+  );
+});
+
+test('增益类道具：给目标挂上对应的状态', async () => {
+  const { battle, actor } = await readyBattle(16);
+
+  const ally = battle.units.find((unit) => unit.side === 'ally' && unit.id !== actor.id);
+  assert.ok(ally);
+
+  const before = effectiveStat(ally, 'spd');
+
+  await battle.submitAction(actor.id, {
+    actorId: actor.id,
+    commandId: 'useItem',
+    itemId: 'spdPill',
+    targetId: ally.id,
+  });
+
+  assert.ok(ally.statuses.some((s) => s.def.id === 'spdUp'), '疾风丹该挂上疾风');
+  assert.ok(effectiveStat(ally, 'spd') > before, '速度该真的涨上去');
+});
+
+test('道具只能对自己人用，对敌人用不出去', async () => {
+  const { battle, actor } = await readyBattle(17);
+
+  const ally = battle.units.find((unit) => unit.side === 'ally' && unit.id !== actor.id);
+  const foe = battle.units.find((unit) => unit.side === 'enemy');
+  assert.ok(ally && foe);
+
+  ally.stats.hp = 10;
+  foe.stats.hp = 100;
+
+  const beforeCount = battle.partyItems.find((s) => s.itemId === 'hpSalve')?.count ?? 0;
+
+  await battle.submitAction(actor.id, {
+    actorId: actor.id,
+    commandId: 'useItem',
+    itemId: 'hpSalve',
+    targetId: foe.id,
+  });
+
+  assert.equal(foe.stats.hp, 100, '敌人的血不该被治');
+  assert.equal(
+    battle.partyItems.find((s) => s.itemId === 'hpSalve')?.count,
+    beforeCount,
+    '没生效就不该消耗',
+  );
+});
+
+test('背包里没有的道具用不出去', async () => {
+  const { battle, actor } = await readyBattle(18);
+
+  const ally = battle.units.find((unit) => unit.side === 'ally' && unit.id !== actor.id);
+  assert.ok(ally);
+
+  const before = ally.stats.hp;
+  await battle.submitAction(actor.id, {
+    actorId: actor.id,
+    commandId: 'useItem',
+    itemId: '不存在的药',
+    targetId: ally.id,
+  });
+
+  assert.equal(ally.stats.hp, before, '什么都没发生');
+  assert.ok(
+    battle.log.some((entry) => entry.text.includes('背包里已经没有这一件')),
+    '该在日志里说明白',
+  );
+});
 
 test('阵法决定我方站位，敌方用战场自带的槽位', () => {
   const battle = makeBattleOn('snow-ridge', 1);
